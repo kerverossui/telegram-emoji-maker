@@ -420,7 +420,7 @@ class TelegramMaker(tk.Tk):
         tk.Label(opt, text="Transparent crop margin", fg=FG, bg=BG1,
                  font=FONT, anchor="w").grid(row=1, column=0, sticky="w", pady=3)
         ttk.Combobox(opt, textvariable=self._crop_var, state="readonly", width=14,
-            values=["No crop", "0 px", "1 px", "2 px", "3 px", "4 px", "5 px"]
+            values=["No crop"] + [f"{i} px" for i in range(0, 26)]
             ).grid(row=1, column=1, sticky="e", pady=3)
 
         # fps
