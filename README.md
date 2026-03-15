@@ -1,77 +1,132 @@
-# telegram-emoji-maker
+# Telegram Sticker & Emoji WebM Maker
 
-# V 1.0.1
+Converts GIFs, PNGs and WEBPs to the `.webm` format required by Telegram for **animated stickers** and **animated emojis**, with full transparency support (VP9 alpha channel).
 
--Allows border cropping before converting
+---
 
-# V 1.0.0
+## Changelog
 
--Supports sticker making 512 x 512 with dynamic max file size to comply with telegram
+### V 1.0.2
+- Fixed critical bug: pixel format `gbrap` → `yuva420p` (caused total VP9 encoder failure)
+- Fixed bug: missing `-framerate` flag in FFmpeg commands
+- Fixed bug: invalid `loop=-1` video filter removed
+- Auto-installation of Python dependencies on startup (Pillow, NumPy)
+- Debug window with full traceback on any error
+- Critical startup errors captured and saved to `ERROR_LOG.txt`
+- Output files now include resolution suffix (`_512px` / `_100px`) to prevent overwrites
 
--Supports static image conversion
+### V 1.0.1
+- Added transparent border cropping before conversion
 
-# About the app
+### V 1.0.0
+- Sticker creation support at 512×512 with dynamic file size to comply with Telegram limits
+- Static image conversion support
 
-This Python application converts GIF files into WebM format for compact, transparent animations, optimized for small file sizes. The output is configured for 100x100 pixel resolution, a maximum file size of 63 KB, and a maximum duration of 2.95 seconds, using VP9 encoding with alpha channel support for transparency.
-Features
+---
 
-Converts GIF animations to WebM format with transparency.
-Automatically crops transparent borders and resizes frames to 100x100 pixels.
-Enforces a 63 KB file size limit through iterative compression (CRF adjustments).
-Supports variable frame rates based on input GIF duration and frame count, up to 2.95 seconds.
-User-friendly Tkinter GUI for selecting input GIF and output WebM file paths.
+## About
 
-Prerequisites
+A Python GUI application (Tkinter) that converts animated and static images to VP9 WebM format with alpha channel, fully compliant with Telegram's technical requirements. Supports stickers (512×512 px, ≤256 KB) and animated emojis (100×100 px, ≤64 KB), with dynamic CRF compression and FPS reduction to automatically meet size limits.
 
-Python 3.x: Ensure Python 3.6 or higher is installed.
-FFmpeg: Required for video conversion. Download from ffmpeg.org or install via a package manager (e.g., choco install ffmpeg on Windows, sudo apt install ffmpeg on Ubuntu).
-Add FFmpeg to your system's PATH environment variable.
+---
 
+## Features
 
-Python Libraries: Install required libraries listed in requirements.txt.
+- Converts GIF, PNG, WEBP and JPG to WebM with transparency
+- Automatic transparent border cropping with adjustable margin (0–3 px)
+- Aspect-ratio-preserving resize with transparent padding
+- Dynamic compression: automatically adjusts CRF to meet the size limit
+- Configurable FPS reduction (50% or 25%) as an alternative compression method
+- Sticker (512 px) and emoji (100×100 px) modes in the same interface
+- Automatic resolution suffix in output filename (`_512px` / `_100px`)
+- Auto-installation of Python dependencies on first run
+- Debug window with full error log on any failure
 
-Installation
+---
 
-Clone or download this repository to your local machine.
-Install the required Python libraries:pip install -r requirements.txt
+## Requirements
 
+- Python 3.10 or higher
+- [FFmpeg](https://ffmpeg.org/download.html) installed and added to the system PATH
+- The following Python libraries (**installed automatically** on first run):
+  - `Pillow`
+  - `numpy`
 
-Ensure FFmpeg is installed and accessible in your system's PATH:
-On Windows, run ffmpeg -version in a command prompt to verify.
-On Linux/macOS, use ffmpeg -version in a terminal.
+### Installing FFmpeg on Windows
+1. Download from https://ffmpeg.org/download.html
+2. Extract the folder and copy the path of the `bin` subfolder
+3. Add it to the system environment variables → `PATH`
+4. Verify with: `ffmpeg -version` in a terminal
 
+---
 
+## Installation
 
-Usage
+```bash
+# Clone the repository
+git clone https://github.com/your-username/telegram-emoji-maker.git
+cd telegram-emoji-maker
 
-Run the script:python webm_animated_emoji_maker_telegram.py
+# Python dependencies install automatically on first run
+# Or install manually:
+pip install -r requirements.txt
+```
 
+---
 
-The GUI will open:
-Click "Browse" next to "Select Input GIF" to choose a GIF file.
-Click "Browse" next to "Save WebM As" to specify the output WebM file path.
-Click "Convert" to process the GIF and generate a WebM animation.
+## Usage
 
+```bash
+python webm_animated_sticker_emoji_maker_telegram.py
+```
 
-Monitor the status label for progress updates (e.g., "Processing frames...", "Conversion complete!").
-If the output exceeds 63 KB, the script will retry with higher compression and display a warning if the limit cannot be met.
+1. **Input files** — select one or more `.gif`, `.png`, `.webp`, `.jpg` files
+2. **Output folder** — choose where to save the `.webm` files
+3. **Crop Mode** — choose whether to crop transparent borders and how many px of margin to keep
+4. **Size Reduction Method** — choose between CRF-based or FPS-based compression
+5. Press **Make Stickers (512px)** or **Make Emojis (100x100px)**
 
-Notes
+Output files are saved as `filename_512px.webm` or `filename_100px.webm` depending on the mode.
 
-The input GIF should have transparency (alpha channel) for best results, as the script preserves transparency in the WebM output.
-The output is tailored for 100x100 pixels and a 63 KB limit, suitable for compact animations (e.g., emoji-like stickers).
-If conversion fails, check the error messages in the GUI for details (e.g., missing FFmpeg, invalid GIF).
-The script creates a temporary directory for PNG frames, which is automatically deleted after conversion.
+---
 
-Troubleshooting
+## Telegram Limits
 
-FFmpeg not found: Ensure FFmpeg is installed and added to your PATH. Verify by running ffmpeg -version.
-Output file too large: The script automatically adjusts compression. If the file still exceeds 63 KB, try a simpler GIF with fewer frames or less complex visuals.
-Invalid GIF: Ensure the input GIF is valid and contains animation frames.
+| Type | Max size | Resolution | Max duration |
+|------|----------|------------|--------------|
+| Animated sticker | 256 KB | 512 × 512 px | 3 s |
+| Animated emoji   | 64 KB  | 100 × 100 px | 3 s |
 
-License
-This project is licensed under the MIT License. See the LICENSE file for details (if included).
-Acknowledgments
+---
 
-Built with Python, Pillow, and FFmpeg.
-Designed for creating compact WebM animations with transparency.
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| FFmpeg not found | Install it and add it to PATH. Verify with `ffmpeg -version` |
+| Output file too large | The script adjusts automatically. Try a simpler GIF with fewer frames |
+| Invalid GIF | Make sure the file is complete and contains animation frames |
+| Pixel format error | Update to V1.0.2 which fixes the `gbrap` → `yuva420p` bug |
+| Crash on startup | Check `ERROR_LOG.txt` generated in the same folder as the script |
+
+---
+
+## Dependencies (requirements.txt)
+
+```
+Pillow>=10.0.0
+numpy>=1.24.0
+```
+
+---
+
+## License
+
+MIT — free to use, modify and distribute.
+
+---
+
+## Credits
+
+Built with Python, Pillow and FFmpeg.
+Designed for creating compact transparent WebM animations for Telegram.
