@@ -1,8 +1,33 @@
+import subprocess
+import sys
+import os
+import traceback
+
+# --- AUTO-INSTALACIÓN DE DEPENDENCIAS ---
+def bootstrap():
+    """Instala Pillow y numpy automáticamente si no están presentes."""
+    dependencies = ["Pillow", "numpy"]
+    needs_restart = False
+    for lib in dependencies:
+        try:
+            if lib == "Pillow": import PIL
+            else: import numpy
+        except ImportError:
+            print(f"Instalando {lib}...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", lib])
+                needs_restart = True
+            except Exception as e:
+                print(f"Error instalando {lib}: {e}")
+    if needs_restart:
+        print("Dependencias instaladas. Reiniciando...")
+        os.execv(sys.executable, ['python'] + sys.argv)
+
+bootstrap()
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageSequence
-import subprocess
-import os
 import tempfile
 import shutil
 import math
@@ -71,12 +96,34 @@ class WebMStickerEmojiApp:
         ttk.Radiobutton(main_frame, text="Reduce FPS by 25% (e.g., 30 to 22.5 FPS)", value="fps_25", variable=self.size_reduction_var, style="TRadiobutton").pack(pady=2)
 
         # Convert buttons
-        ttk.Button(main_frame, text="Make Stickers (512px side)", command=lambda: self.convert(is_sticker=True), style="TButton").pack(pady=10)
-        ttk.Button(main_frame, text="Make Emojis (100x100px)", command=lambda: self.convert(is_sticker=False), style="TButton").pack(pady=10)
+        ttk.Button(main_frame, text="Make Stickers (512px side)", command=lambda: self.safe_convert(is_sticker=True), style="TButton").pack(pady=10)
+        ttk.Button(main_frame, text="Make Emojis (100x100px)", command=lambda: self.safe_convert(is_sticker=False), style="TButton").pack(pady=10)
 
         # Status label
         self.status_label = tk.Label(main_frame, text="", font=("Arial", 10), bg="#2c2f33", fg="#bbbbbb")
         self.status_label.pack(pady=5)
+
+    def show_debug(self, error_trace):
+        """Muestra una ventana con el traceback completo del error."""
+        debug_win = tk.Toplevel(self.root)
+        debug_win.title("DEBUG LOG - Error Detectado")
+        debug_win.configure(bg="black")
+        tk.Label(debug_win, text="ERROR DETALLADO", fg="#FF4444", bg="black",
+                 font=("Consolas", 11, "bold")).pack(pady=(8, 2))
+        text = tk.Text(debug_win, bg="black", fg="#00FF00",
+                       font=("Consolas", 10), width=90, height=30)
+        text.insert("1.0", error_trace)
+        text.config(state="disabled")
+        text.pack(padx=10, pady=10, expand=True, fill="both")
+        ttk.Button(debug_win, text="Cerrar",
+                   command=debug_win.destroy).pack(pady=(0, 10))
+
+    def safe_convert(self, is_sticker):
+        """Llama a convert() con captura total de errores y ventana de debug."""
+        try:
+            self.convert(is_sticker=is_sticker)
+        except Exception:
+            self.show_debug(traceback.format_exc())
 
     def browse_input(self):
         files = filedialog.askopenfilenames(filetypes=[("Image files", "*.gif;*.png;*.jpg;*.jpeg;*.webp")])
@@ -265,34 +312,48 @@ class WebMStickerEmojiApp:
         """Convert image sequence to VP9 WebM with FFmpeg, strictly enforcing duration."""
         try:
             max_duration = MAX_DURATION_ANIMATED if is_animated else MAX_DURATION_STATIC
-            max_size_kb = MAX_SIZE_KB_STICKER if is_sticker else MAX_SIZE_KB_EMOJI
-            scale = "512:512" if is_sticker else "100:100"
+            max_size_kb  = MAX_SIZE_KB_STICKER if is_sticker else MAX_SIZE_KB_EMOJI
+            scale        = "512:512" if is_sticker else "100:100"
             total_duration = min(duration, max_duration)
-            fps = frame_count / total_duration
+            fps          = max(1.0, frame_count / max(total_duration, 0.001))
             speed_factor = duration / max_duration if duration > max_duration else 1.0
-            setpts = f"setpts={1/speed_factor}*PTS"
-            loop_filter = ",loop=-1" if is_animated else ""
+            setpts       = f"setpts={1/speed_factor}*PTS"
+
+            # FIX: vf base sin loop (loop=-1 no es filtro vf válido)
+            vf_base = (
+                f"{setpts},"
+                f"scale={scale}:force_original_aspect_ratio=decrease,"
+                f"pad={scale}:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+                f"format=yuva420p"           # ← convierte gbrap/rgba → yuva420p
+            )
+
+            def run_ffmpeg(vf, out_fps, crf):
+                cmd = [
+                    "ffmpeg",
+                    "-framerate", str(out_fps),   # ← fps de entrada del image sequence
+                    "-i", input_pattern,
+                    "-c:v", "libvpx-vp9",
+                    "-pix_fmt", "yuva420p",        # ← pixel format con alpha para VP9
+                    "-b:v", "0",
+                    "-crf", str(crf),
+                    "-vf", vf,
+                    "-r", str(out_fps),            # ← fps de salida
+                    "-an",
+                    "-t", str(max_duration),
+                    "-y",
+                    output_path
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
 
             size_reduction_method = self.size_reduction_var.get()
+
             if size_reduction_method == "crf":
                 crf = 30
                 max_attempts = 5
                 for attempt in range(max_attempts):
-                    cmd = [
-                        "ffmpeg",
-                        "-i", input_pattern,
-                        "-c:v", "libvpx-vp9",
-                        "-b:v", "0",
-                        "-crf", str(crf),
-                        "-vf", f"{setpts},fps={fps},scale={scale}:force_original_aspect_ratio=decrease,pad={scale}:(ow-iw)/2:(oh-ih)/2:color=black@0{loop_filter}",
-                        "-an",
-                        "-t", str(max_duration),
-                        "-y",
-                        output_path
-                    ]
                     self.status_label.config(text=f"Converting with CRF={crf}...")
                     self.root.update()
-                    subprocess.run(cmd, check=True, capture_output=True)
+                    run_ffmpeg(vf_base, fps, crf)
                     if os.path.getsize(output_path) / 1024 <= max_size_kb:
                         break
                     crf += 5
@@ -300,29 +361,15 @@ class WebMStickerEmojiApp:
                         messagebox.showwarning("Warning", f"WebM exceeds {max_size_kb} KB. Using highest compression.")
             else:
                 fps_reduction_factor = 0.5 if size_reduction_method == "fps_50" else 0.75
-                current_fps = fps * fps_reduction_factor
-                current_frame_count = max(1, math.ceil(frame_count * fps_reduction_factor))
+                current_fps = max(1.0, fps * fps_reduction_factor)
                 max_attempts = 3
                 for attempt in range(max_attempts):
-                    cmd = [
-                        "ffmpeg",
-                        "-i", input_pattern,
-                        "-c:v", "libvpx-vp9",
-                        "-b:v", "0",
-                        "-crf", "30",
-                        "-vf", f"{setpts},fps={current_fps},scale={scale}:force_original_aspect_ratio=decrease,pad={scale}:(ow-iw)/2:(oh-ih)/2:color=black@0{loop_filter}",
-                        "-an",
-                        "-t", str(max_duration),
-                        "-y",
-                        output_path
-                    ]
                     self.status_label.config(text=f"Converting with FPS={current_fps:.1f}...")
                     self.root.update()
-                    subprocess.run(cmd, check=True, capture_output=True)
+                    run_ffmpeg(vf_base, current_fps, 30)
                     if os.path.getsize(output_path) / 1024 <= max_size_kb:
                         break
-                    current_fps *= 0.75
-                    current_frame_count = max(1, math.ceil(current_frame_count * 0.75))
+                    current_fps = max(1.0, current_fps * 0.75)
                     if attempt == max_attempts - 1:
                         messagebox.showwarning("Warning", f"WebM exceeds {max_size_kb} KB after FPS reduction.")
             self.status_label.config(text="Conversion complete!")
@@ -420,7 +467,8 @@ class WebMStickerEmojiApp:
                 frame_count = len(frames)
 
                 base_name = os.path.splitext(os.path.basename(input_path))[0]
-                output_path = os.path.join(output_folder, f"{base_name}.webm")
+                suffix = "512px" if is_sticker else "100px"
+                output_path = os.path.join(output_folder, f"{base_name}_{suffix}.webm")
                 input_pattern = os.path.join(temp_dir, "frame_%04d.png")
                 self.create_webm(input_pattern, output_path, total_duration, frame_count, is_animated, is_sticker)
 
@@ -433,6 +481,11 @@ class WebMStickerEmojiApp:
         self.status_label.config(text="Batch conversion complete!")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = WebMStickerEmojiApp(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        app = WebMStickerEmojiApp(root)
+        root.mainloop()
+    except Exception:
+        with open("ERROR_LOG.txt", "w") as f:
+            f.write(traceback.format_exc())
+        print("Error crítico al iniciar. Revisa ERROR_LOG.txt")
