@@ -79,8 +79,6 @@ def compose_gif_frames(frames):
     composed = []
     size = frames[0].size
     for frame in frames:
-        # Start each frame from a fully transparent canvas —
-        # never accumulate content from previous frames (stacking bug fix).
         canvas = Image.new("RGBA", size, (0, 0, 0, 0))
         canvas.paste(frame, (0, 0), frame)
         composed.append(canvas)
@@ -209,6 +207,182 @@ def convert_file(path, out_dir, is_sticker, crop_margin, target_fps, progress_cb
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 3D SPIN ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def autocrop_rgba(img, margin=4):
+    arr   = np.array(img.convert("RGBA"))
+    alpha = arr[:, :, 3]
+    rows  = np.any(alpha > 0, axis=1)
+    cols  = np.any(alpha > 0, axis=0)
+    if not rows.any():
+        return img
+    h, w   = arr.shape[:2]
+    top    = max(0, int(np.argmax(rows)) - margin)
+    bottom = min(h, int(len(rows) - np.argmax(rows[::-1])) + margin)
+    left   = max(0, int(np.argmax(cols)) - margin)
+    right  = min(w, int(len(cols) - np.argmax(cols[::-1])) + margin)
+    return img.crop((left, top, right, bottom))
+
+
+def make_3d_spin_frames(img_path,
+                         n_frames     = 36,
+                         thick_px     = 30,
+                         edge_color   = (30, 30, 30),
+                         edge_opacity = 1.0,
+                         tilt_deg     = 15,
+                         flip_back    = False,
+                         bg_color     = (0, 0, 0, 0),
+                         progress_cb  = None):
+    img = Image.open(img_path).convert("RGBA")
+    img = autocrop_rgba(img)
+    W, H = img.size
+
+    tilt    = math.radians(tilt_deg)
+    y_scale = math.cos(tilt)
+
+    CW = W + thick_px * 2 + 16
+    CH = H + thick_px * 2 + 16
+    cx = CW // 2
+    cy = CH // 2
+
+    src_alpha = np.array(img)[:, :, 3]
+    THRESH    = 32
+
+    row_left  = np.full(H, W,  dtype=np.int32)
+    row_right = np.full(H, -1, dtype=np.int32)
+    for y in range(H):
+        opaque = np.where(src_alpha[y] >= THRESH)[0]
+        if len(opaque):
+            row_left[y]  = int(opaque[0])
+            row_right[y] = int(opaque[-1])
+
+    ec = np.array(edge_color, dtype=np.float32)
+
+    frames = []
+    for i in range(n_frames):
+        if progress_cb:
+            progress_cb(i, n_frames)
+
+        theta        = 2 * math.pi * i / n_frames
+        cos_t        = math.cos(theta)
+        sin_t        = math.sin(theta)
+        x_scale      = abs(cos_t)
+        facing_front = cos_t >= 0
+        rim_on_right = sin_t > 0
+
+        face_h  = max(1, int(H * y_scale))
+        face_w  = max(1, int(W * x_scale)) if x_scale > 0.005 else 0
+        scale_y = face_h / H
+
+        rim_w     = max(1, int(thick_px * abs(sin_t)))
+        frame_arr = np.zeros((CH, CW, 4), dtype=np.uint8)
+
+        # Face
+        if face_w >= 1:
+            face = img.resize((face_w, face_h), Image.LANCZOS)
+            if not facing_front and not flip_back:
+                face = face.transpose(Image.FLIP_LEFT_RIGHT)
+            fa  = np.array(face).astype(np.float32)
+            fa  = fa.astype(np.uint8)
+            px  = max(0, min(CW - face_w, cx - face_w // 2))
+            py  = max(0, min(CH - face_h, cy - face_h // 2))
+            ey2 = min(py + face_h, CH); ex2 = min(px + face_w, CW)
+            fy2 = ey2 - py;             fx2 = ex2 - px
+            if fy2 > 0 and fx2 > 0:
+                src = fa[:fy2, :fx2].astype(np.float32)
+                a_  = src[:, :, 3:4] / 255.0
+                dst = frame_arr[py:ey2, px:ex2].astype(np.float32)
+                frame_arr[py:ey2, px:ex2] = (src * a_ + dst * (1 - a_)).astype(np.uint8)
+
+        # Rim
+        if abs(sin_t) > 0.02 and rim_w >= 1 and edge_opacity > 0:
+            fy_arr    = np.arange(face_h)
+            src_y_arr = np.clip((fy_arr / scale_y).astype(np.int32), 0, H - 1)
+            sl_arr    = row_left[src_y_arr]
+            sr_arr    = row_right[src_y_arr]
+            valid     = sr_arr >= sl_arr
+            cy_arr    = cy - face_h // 2 + fy_arr
+
+            eff_face_w = max(1, face_w)
+            scale_x    = eff_face_w / W
+            face_anchor = cx - eff_face_w // 2
+
+            if rim_on_right:
+                sr_canvas     = face_anchor + (sr_arr * scale_x).astype(np.int32)
+                rim_start_arr = sr_canvas + 1
+                rim_end_arr   = sr_canvas + 1 + rim_w
+                t_shade = np.linspace(0, 1, rim_w)
+            else:
+                sl_canvas     = face_anchor + (sl_arr * scale_x).astype(np.int32)
+                rim_end_arr   = sl_canvas
+                rim_start_arr = sl_canvas - rim_w
+                t_shade = 1.0 - np.linspace(0, 1, rim_w)
+
+            bright_v = np.maximum(0.10, np.cos((1.0 - t_shade) * math.pi / 2))                        * (0.45 + 0.55 * abs(sin_t))
+            rim_rgb  = np.clip(ec[np.newaxis, :] * bright_v[:, np.newaxis],
+                               0, 255).astype(np.uint8)
+            rim_a    = int(255 * edge_opacity)
+
+            for fi in range(face_h):
+                if not valid[fi]:
+                    continue
+                py_ = int(cy_arr[fi])
+                if py_ < 0 or py_ >= CH:
+                    continue
+                rx0 = int(rim_start_arr[fi]); rx1 = int(rim_end_arr[fi])
+                cx0 = max(0, rx0);            cx1 = min(CW, rx1)
+                if cx1 <= cx0:
+                    continue
+                off0 = max(0, cx0 - rx0)
+                off1 = min(rim_w, off0 + (cx1 - cx0))
+                if off1 <= off0:
+                    continue
+                n    = off1 - off0
+                mask = frame_arr[py_, cx0:cx0 + n, 3] < 128
+                if not mask.any():
+                    continue
+                frame_arr[py_, cx0:cx0 + n, :3] = np.where(
+                    mask[:, np.newaxis], rim_rgb[off0:off1],
+                    frame_arr[py_, cx0:cx0 + n, :3])
+                frame_arr[py_, cx0:cx0 + n, 3] = np.where(
+                    mask, rim_a, frame_arr[py_, cx0:cx0 + n, 3])
+
+        frames.append(Image.fromarray(frame_arr, "RGBA"))
+
+    return frames
+
+
+def spin_frames_to_webm(frames, out_path, fps=24, size_px=512, max_kb=256):
+    """Save 3D spin RGBA frames as VP9 WebM for Telegram."""
+    tmp = tempfile.mkdtemp()
+    try:
+        max_w = max(f.width  for f in frames)
+        max_h = max(f.height for f in frames)
+        for i, f in enumerate(frames):
+            canvas = Image.new("RGBA", (max_w, max_h), (0, 0, 0, 0))
+            canvas.paste(f, ((max_w - f.width) // 2, (max_h - f.height) // 2))
+            canvas.save(os.path.join(tmp, f"frame_{i:04d}.png"), "PNG")
+        pattern = os.path.join(tmp, "frame_%04d.png")
+        size    = f"{size_px}:{size_px}"
+        vf      = (f"scale={size}:force_original_aspect_ratio=decrease,"
+                   f"pad={size}:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+                   f"format=yuva420p")
+        for crf in [30, 36, 42, 48, 54, 60, 63]:
+            cmd = ["ffmpeg", "-framerate", str(fps), "-i", pattern,
+                   "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+                   "-b:v", "0", "-crf", str(crf), "-vf", vf,
+                   "-an", "-t", str(MAX_DURATION), "-y", out_path]
+            subprocess.run(cmd, capture_output=True)
+            kb = os.path.getsize(out_path) / 1024
+            if kb <= max_kb:
+                break
+        return os.path.getsize(out_path) / 1024
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -291,10 +465,348 @@ class TelegramMaker(tk.Tk):
         self._cancel_flag = threading.Event()
         self._q           = queue.Queue()
 
+        # spin state — must exist before _poll_queue is called
+        self._spin_anim_id  = None
+        self._spin_frames   = []
+        self._spin_photos   = []
+        self._spin_anim_idx = 0
+        self._spin_q        = queue.Queue()
+        self._spin_img_path = None
+
         self._check_ffmpeg()
         self._build_ui()
+        self._build_spin_tab()
         self._set_icon()
         self._poll_queue()
+
+    def _build_spin_tab(self):
+        """Build the 3D Spin tab."""
+        tab2 = tk.Frame(self._notebook, bg=BG0)
+        self._notebook.add(tab2, text="  3D Spin  ")
+
+        # ── Two-column layout ──────────────────────────────────────────
+        tab2.columnconfigure(0, weight=1)
+        tab2.columnconfigure(1, weight=1)
+        tab2.rowconfigure(0, weight=1)
+
+        # LEFT: controls
+        left = tk.Frame(tab2, bg=BG1, padx=16, pady=14)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=8)
+
+        def lbl(text, row, bold=False):
+            tk.Label(left, text=text, bg=BG1, fg=FG2,
+                     font=FONT_BOLD if bold else FONT, anchor="w").grid(
+                row=row, column=0, sticky="w", pady=(6, 0))
+
+        def val_lbl(var, row):
+            tk.Label(left, textvariable=var, bg=BG1, fg=FG,
+                     font=FONT, width=5).grid(row=row, column=1, sticky="e", pady=(6, 0))
+
+        def slider(var, from_, to, row, cmd=None):
+            kw = dict(from_=from_, to=to, variable=var, orient="horizontal", length=220)
+            if cmd:
+                kw["command"] = cmd
+            ttk.Scale(left, **kw).grid(
+                row=row+1, column=0, columnspan=2, sticky="ew", pady=(2, 4))
+
+        # File
+        tk.Label(left, text="Input image:", bg=BG1, fg=FG2, font=FONT).grid(
+            row=0, column=0, sticky="w")
+        self._spin_file_lbl = tk.Label(left, text="No file selected",
+                                       bg=BG2, fg=FG2, font=FONT,
+                                       width=24, anchor="w", padx=6)
+        self._spin_file_lbl.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        self._btn(left, "Browse…", self._spin_browse, ACC).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+
+        # Frames
+        self._spin_frames_var = tk.IntVar(value=36)
+        lbl("Frames:", 3); val_lbl(self._spin_frames_var, 3)
+        slider(self._spin_frames_var, 12, 72, 3,
+               cmd=lambda v: self._spin_frames_var.set(int(float(v))))
+
+        # Thickness
+        self._spin_thick_var = tk.IntVar(value=20)
+        lbl("Thickness px:", 5); val_lbl(self._spin_thick_var, 5)
+        slider(self._spin_thick_var, 2, 200, 5,
+               cmd=lambda v: self._spin_thick_var.set(int(float(v))))
+
+        # Edge opacity
+        self._spin_opacity_var = tk.IntVar(value=100)
+        lbl("Edge opacity %:", 7); val_lbl(self._spin_opacity_var, 7)
+        slider(self._spin_opacity_var, 0, 100, 7,
+               cmd=lambda v: self._spin_opacity_var.set(int(float(v))))
+
+        # Tilt
+        self._spin_tilt_var = tk.IntVar(value=15)
+        lbl("Tilt °:", 9); val_lbl(self._spin_tilt_var, 9)
+        slider(self._spin_tilt_var, 0, 40, 9,
+               cmd=lambda v: self._spin_tilt_var.set(int(float(v))))
+
+        # FPS
+        self._spin_fps_var = tk.IntVar(value=24)
+        lbl("FPS:", 11); val_lbl(self._spin_fps_var, 11)
+        slider(self._spin_fps_var, 8, 50, 11,
+               cmd=lambda v: self._spin_fps_var.set(int(float(v))))
+
+        # Edge color
+        tk.Label(left, text="Edge color:", bg=BG1, fg=FG2, font=FONT).grid(
+            row=13, column=0, sticky="w", pady=(8, 0))
+        self._spin_edge_var = tk.StringVar(value="Black")
+        edge_cb = ttk.Combobox(left, textvariable=self._spin_edge_var, state="readonly",
+                               values=["Black", "Dark gray", "White",
+                                       "Gold", "Silver", "Red", "Blue"], width=14)
+        edge_cb.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+
+        # Flip back face
+        self._spin_flip_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(left, text="Flip back face horizontally",
+                       variable=self._spin_flip_var,
+                       bg=BG1, fg=FG, selectcolor=BG0,
+                       activebackground=BG1, font=FONT).grid(
+            row=15, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        # Output mode
+        tk.Label(left, text="Output:", bg=BG1, fg=FG2, font=FONT).grid(
+            row=16, column=0, sticky="w")
+        self._spin_out_var = tk.StringVar(value="sticker")
+        out_frame = tk.Frame(left, bg=BG1)
+        out_frame.grid(row=17, column=0, columnspan=2, sticky="w", pady=(2, 10))
+        for val, txt in [("sticker", "Sticker 512px"), ("emoji", "Emoji 100px"), ("gif", "GIF")]:
+            tk.Radiobutton(out_frame, text=txt, variable=self._spin_out_var, value=val,
+                           bg=BG1, fg=FG, selectcolor=BG0,
+                           activebackground=BG1, font=FONT).pack(side="left", padx=(0, 10))
+
+        # Generate button
+        self._spin_gen_btn = tk.Button(left, text="▶  Generate",
+            bg=ACC2, fg="#0a1a12", font=FONT_BOLD, relief="flat",
+            padx=10, pady=7, cursor="hand2", command=self._spin_generate)
+        self._spin_gen_btn.grid(row=18, column=0, columnspan=2, sticky="ew", pady=(4, 4))
+
+        # Save button
+        self._spin_save_btn = tk.Button(left, text="💾  Save…",
+            bg=BG2, fg=FG, font=FONT, relief="flat",
+            padx=10, pady=5, cursor="hand2", state="disabled",
+            command=self._spin_save)
+        self._spin_save_btn.grid(row=19, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+
+        # Progress
+        self._spin_prog = ttk.Progressbar(left, length=220, mode="determinate")
+        self._spin_prog.grid(row=20, column=0, columnspan=2, sticky="ew", pady=(8, 2))
+        self._spin_status = tk.Label(left, text="Ready", bg=BG1, fg=FG2, font=FONT)
+        self._spin_status.grid(row=21, column=0, columnspan=2, sticky="w")
+
+        # RIGHT: preview
+        right = tk.Frame(tab2, bg=BG1, padx=10, pady=10)
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=8)
+        tk.Label(right, text="Preview", font=FONT_BOLD, bg=BG1, fg=FG2).pack(anchor="w")
+        self._spin_canvas = tk.Canvas(right, width=320, height=320,
+                                      bg=BG2, highlightthickness=0)
+        self._spin_canvas.pack(pady=(4, 0))
+        self._spin_canvas.create_text(160, 160, text="Generate to preview",
+                                      fill=FG2, font=FONT, tags="placeholder")
+
+    # ── 3D Spin helpers ───────────────────────────────────────────────
+
+    SPIN_EDGE_COLORS = {
+        "Black":     (5,   5,   5),
+        "Dark gray": (40,  40,  40),
+        "White":     (220, 220, 220),
+        "Gold":      (180, 140, 30),
+        "Silver":    (160, 165, 170),
+        "Red":       (140, 20,  20),
+        "Blue":      (20,  40,  160),
+    }
+
+    def _spin_browse(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"), ("All", "*.*")])
+        if not path:
+            return
+        self._spin_img_path = path
+        name = os.path.basename(path)
+        self._spin_file_lbl.config(
+            text=name[:26] + ("…" if len(name) > 26 else ""), fg=FG)
+        self._spin_show_static(path)
+
+    def _spin_show_static(self, path):
+        try:
+            img = Image.open(path).convert("RGBA")
+            img.thumbnail((320, 320), Image.LANCZOS)
+            checker = self._spin_make_checker(img.width, img.height)
+            checker.paste(img, (0, 0), img)
+            photo = ImageTk.PhotoImage(checker)
+            self._spin_canvas.delete("all")
+            self._spin_canvas.create_image(160, 160, anchor="center", image=photo)
+            self._spin_canvas._img = photo
+        except Exception:
+            pass
+
+    def _spin_make_checker(self, w, h, sq=10):
+        checker = Image.new("RGBA", (w, h), (200, 200, 200, 255))
+        for y in range(0, h, sq):
+            for x in range(0, w, sq):
+                if (x // sq + y // sq) % 2 == 0:
+                    for py in range(y, min(y + sq, h)):
+                        for px in range(x, min(x + sq, w)):
+                            checker.putpixel((px, py), (160, 160, 160, 255))
+        return checker
+
+    def _spin_generate(self):
+        if not hasattr(self, "_spin_img_path") or not self._spin_img_path:
+            self._spin_status.config(text="Select an image first.", fg=ERR)
+            return
+        self._spin_stop_anim()
+        self._spin_gen_btn.config(state="disabled")
+        self._spin_save_btn.config(state="disabled")
+        self._spin_prog["value"] = 0
+        self._spin_frames = []
+
+        n_frames  = self._spin_frames_var.get()
+        thick     = self._spin_thick_var.get()
+        opacity   = self._spin_opacity_var.get() / 100.0
+        tilt      = self._spin_tilt_var.get()
+        edge_col  = self.SPIN_EDGE_COLORS.get(self._spin_edge_var.get(), (5, 5, 5))
+        flip      = self._spin_flip_var.get()
+        img_path  = self._spin_img_path
+
+        def progress_cb(i, total):
+            pct = int(100 * i / total)
+            self._spin_q.put(("progress", pct, f"Frame {i+1}/{total}…"))
+
+        def worker():
+            try:
+                frames = make_3d_spin_frames(
+                    img_path,
+                    n_frames=n_frames,
+                    thick_px=thick,
+                    edge_color=edge_col,
+                    edge_opacity=opacity,
+                    tilt_deg=tilt,
+                    flip_back=flip,
+                    progress_cb=progress_cb,
+                )
+                self._spin_q.put(("done", frames))
+            except Exception as e:
+                self._spin_q.put(("error", str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _spin_save(self):
+        if not self._spin_frames:
+            return
+        mode = self._spin_out_var.get()
+        fps  = self._spin_fps_var.get()
+
+        if mode == "gif":
+            path = filedialog.asksaveasfilename(
+                defaultextension=".gif",
+                filetypes=[("GIF", "*.gif")],
+                initialfile="spin3d.gif")
+            if not path:
+                return
+            self._spin_status.config(text="Saving GIF…", fg=FG2)
+            self.update()
+            def worker_gif():
+                try:
+                    dur = max(20, int(1000 / fps))
+                    self._spin_frames[0].save(
+                        path, save_all=True,
+                        append_images=self._spin_frames[1:],
+                        loop=0, duration=dur, disposal=2, optimize=False)
+                    kb = os.path.getsize(path) / 1024
+                    self._spin_q.put(("status", f"Saved {kb:.0f} KB", ACC2))
+                except Exception as e:
+                    self._spin_q.put(("status", f"Error: {e}", ERR))
+            threading.Thread(target=worker_gif, daemon=True).start()
+            return
+
+        if not self._ffmpeg_ok:
+            self._spin_status.config(text="FFmpeg not found.", fg=ERR)
+            return
+        is_sticker = mode == "sticker"
+        size_px    = STICKER_PX if is_sticker else EMOJI_PX
+        max_kb     = STICKER_KB if is_sticker else EMOJI_KB
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".webm",
+            filetypes=[("WebM", "*.webm")],
+            initialfile=f"spin3d_{'512px' if is_sticker else '100px'}.webm")
+        if not path:
+            return
+
+        self._spin_status.config(text="Encoding WebM…", fg=FG2)
+        self.update()
+
+        def worker():
+            try:
+                kb = spin_frames_to_webm(
+                    self._spin_frames, path,
+                    fps=fps, size_px=size_px, max_kb=max_kb)
+                msg = f"Saved {kb:.0f} KB"
+                color = ACC2 if kb <= max_kb else WARN
+                if kb > max_kb:
+                    msg += f" ⚠ exceeds {max_kb} KB"
+                self._spin_q.put(("status", msg, color))
+            except Exception as e:
+                self._spin_q.put(("status", f"Error: {e}", ERR))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _spin_stop_anim(self):
+        if self._spin_anim_id:
+            self.after_cancel(self._spin_anim_id)
+            self._spin_anim_id = None
+
+    def _spin_tick(self):
+        if not self._spin_photos:
+            return
+        photo = self._spin_photos[self._spin_anim_idx]
+        self._spin_canvas.delete("all")
+        self._spin_canvas.create_image(160, 160, anchor="center", image=photo)
+        self._spin_anim_idx = (self._spin_anim_idx + 1) % len(self._spin_photos)
+        fps   = self._spin_fps_var.get()
+        delay = max(20, int(1000 / fps))
+        self._spin_anim_id = self.after(delay, self._spin_tick)
+
+    def _spin_build_previews(self, frames):
+        photos = []
+        for f in frames:
+            thumb = f.copy()
+            thumb.thumbnail((320, 320), Image.LANCZOS)
+            W2, H2 = thumb.size
+            checker = self._spin_make_checker(320, 320)
+            checker.paste(thumb, ((320 - W2) // 2, (320 - H2) // 2), thumb)
+            photos.append(ImageTk.PhotoImage(checker))
+        return photos
+
+    def _spin_poll(self):
+        try:
+            while True:
+                msg = self._spin_q.get_nowait()
+                kind = msg[0]
+                if kind == "progress":
+                    self._spin_prog["value"] = msg[1]
+                    self._spin_status.config(text=msg[2], fg=FG2)
+                elif kind == "done":
+                    frames = msg[1]
+                    self._spin_frames = frames
+                    self._spin_prog["value"] = 100
+                    self._spin_status.config(
+                        text=f"Done — {len(frames)} frames", fg=ACC2)
+                    self._spin_gen_btn.config(state="normal")
+                    self._spin_save_btn.config(state="normal")
+                    self._spin_photos   = self._spin_build_previews(frames)
+                    self._spin_anim_idx = 0
+                    self._spin_tick()
+                elif kind == "error":
+                    self._spin_status.config(text=f"Error: {msg[1]}", fg=ERR)
+                    self._spin_gen_btn.config(state="normal")
+                elif kind == "status":
+                    self._spin_status.config(text=msg[1], fg=msg[2])
+        except queue.Empty:
+            pass
+
 
     def _set_icon(self):
         """Draw a Telegram-style paper plane as window icon."""
@@ -335,9 +847,25 @@ class TelegramMaker(tk.Tk):
             tk.Label(self, text="⚠  FFmpeg not found — install it and add to PATH",
                      fg=ERR, bg=BG0, font=FONT).pack(pady=(0, 8))
 
-        # ── Two-column layout ─────────────────────────────────────────
-        body = tk.Frame(self, bg=BG0)
-        body.pack(fill="both", expand=True, padx=24, pady=0)
+        # ── Notebook with tabs ────────────────────────────────────────
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("TNotebook", background=BG0, borderwidth=0)
+        style.configure("TNotebook.Tab", background=BG2, foreground=FG2,
+                        padding=[14, 6], font=FONT)
+        style.map("TNotebook.Tab",
+                  background=[("selected", BG1)],
+                  foreground=[("selected", FG)])
+        self._notebook = ttk.Notebook(self)
+        self._notebook.pack(fill="both", expand=True, padx=24, pady=(0, 8))
+
+        # Tab 1: GIF/WebM converter
+        tab1 = tk.Frame(self._notebook, bg=BG0)
+        self._notebook.add(tab1, text="  Convert GIF / WebM  ")
+
+        # ── Two-column layout inside tab1 ────────────────────────────
+        body = tk.Frame(tab1, bg=BG0)
+        body.pack(fill="both", expand=True, padx=0, pady=0)
         body.columnconfigure(0, weight=3)
         body.columnconfigure(1, weight=2)
 
@@ -459,8 +987,8 @@ class TelegramMaker(tk.Tk):
         self._cancel_btn.pack(fill="x")
 
         # ── Log / status bar ──────────────────────────────────────────
-        log_frame = tk.Frame(self, bg=BG1)
-        log_frame.pack(fill="x", padx=24, pady=(10, 16))
+        log_frame = tk.Frame(tab1, bg=BG1)
+        log_frame.pack(fill="x", padx=0, pady=(10, 4))
 
         self._progress = ttk.Progressbar(log_frame, mode="determinate", maximum=100)
         self._progress.pack(fill="x", pady=(8, 4))
@@ -680,6 +1208,7 @@ class TelegramMaker(tk.Tk):
                     self._log_write("All done.", "ok")
         except queue.Empty:
             pass
+        self._spin_poll()
         self.after(50, self._poll_queue)
 
 
