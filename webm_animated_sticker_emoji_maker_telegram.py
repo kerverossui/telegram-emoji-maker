@@ -77,11 +77,13 @@ def compose_gif_frames(frames):
     preventing artefacts from previous frames bleeding through.
     """
     composed = []
-    canvas   = Image.new("RGBA", frames[0].size, (0, 0, 0, 0))
+    size = frames[0].size
     for frame in frames:
-        canvas = canvas.copy()
+        # Start each frame from a fully transparent canvas —
+        # never accumulate content from previous frames (stacking bug fix).
+        canvas = Image.new("RGBA", size, (0, 0, 0, 0))
         canvas.paste(frame, (0, 0), frame)
-        composed.append(canvas.copy())
+        composed.append(canvas)
     return composed
 
 
