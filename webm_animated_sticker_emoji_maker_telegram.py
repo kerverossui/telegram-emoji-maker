@@ -225,16 +225,85 @@ def autocrop_rgba(img, margin=4):
     return img.crop((left, top, right, bottom))
 
 
+def apply_glint(face_arr, theta, intensity=0.7, angle_deg=40):
+    """
+    Screen-blend a diagonal white glint band over a face RGBA array.
+    face_arr : (H, W, 4) uint8 numpy array — modified in-place.
+    Only visible when face is facing camera (cos²(theta) falloff).
+    """
+    H, W = face_arr.shape[:2]
+    if H < 2 or W < 2:
+        return face_arr
+    cos_t      = math.cos(theta)
+    visibility = (cos_t ** 2) * intensity
+    if visibility < 0.005:
+        return face_arr
+    # Band sweeps left->right within each half-rotation
+    half_pos = (theta % math.pi) / math.pi      # 0..1 per half turn
+    band_cx  = W * (half_pos * 1.4 - 0.2)       # enters left, exits right
+    band_w   = W * 0.30
+    cos_a    = math.cos(math.radians(angle_deg))
+    sin_a    = math.sin(math.radians(angle_deg))
+    xs       = np.arange(W, dtype=np.float32)
+    ys       = np.arange(H, dtype=np.float32)
+    xg, yg   = np.meshgrid(xs, ys)
+    proj     = (xg - band_cx) * cos_a + (yg - H * 0.5) * (-sin_a)
+    glint_a  = np.exp(-0.5 * (proj / (band_w * 0.4)) ** 2) * visibility
+    glint_a *= face_arr[:, :, 3] / 255.0          # respect image alpha
+    base     = face_arr[:, :, :3].astype(np.float32) / 255.0
+    screen   = 1.0 - (1.0 - base) * (1.0 - glint_a[:, :, np.newaxis])
+    face_arr[:, :, :3] = (screen * 255).clip(0, 255).astype(np.uint8)
+    return face_arr
+
+
+
+def apply_glint_cel(face_arr, theta, intensity=0.85):
+    """
+    Cel glint: thin + thick + thin vertical bars in face-space.
+    Bars squish naturally with face foreshortening. Screen blend.
+    """
+    H, W = face_arr.shape[:2]
+    if H < 2 or W < 2:
+        return face_arr
+    cos_t = math.cos(theta)
+    if abs(cos_t) < 0.05:
+        return face_arr
+    half_pos = (theta % math.pi) / math.pi
+    group_cx = -W * 0.3 + half_pos * (W * 1.6)
+    thin_w   = W * 0.06
+    thick_w  = W * 0.14
+    gap      = W * 0.04
+    bars = [
+        (group_cx - thick_w / 2 - gap - thin_w / 2, thin_w),
+        (group_cx,                                   thick_w),
+        (group_cx + thick_w / 2 + gap + thin_w / 2, thin_w),
+    ]
+    xs   = np.arange(W, dtype=np.float32)
+    mask = np.zeros(W, dtype=np.float32)
+    for cx, bw in bars:
+        mask += (np.abs(xs - cx) < bw * 0.5).astype(np.float32)
+    mask    = np.clip(mask, 0, 1)
+    glint_a = mask[np.newaxis, :] * intensity * (face_arr[:, :, 3] / 255.0)
+    base    = face_arr[:, :, :3].astype(np.float32) / 255.0
+    screen  = 1.0 - (1.0 - base) * (1.0 - glint_a[:, :, np.newaxis])
+    face_arr[:, :, :3] = (screen * 255).clip(0, 255).astype(np.uint8)
+    return face_arr
+
+
 def make_3d_spin_frames(img_path,
-                         n_frames     = 36,
-                         thick_px     = 30,
-                         edge_color   = (30, 30, 30),
-                         edge_opacity = 1.0,
-                         tilt_deg     = 15,
-                         flip_back    = False,
-                         crop_margin  = 4,
-                         bg_color     = (0, 0, 0, 0),
-                         progress_cb  = None):
+                         n_frames      = 36,
+                         thick_px      = 30,
+                         edge_color    = (30, 30, 30),
+                         edge_opacity  = 1.0,
+                         tilt_deg      = 15,
+                         flip_back     = False,
+                         crop_margin   = 4,
+                         glint         = False,
+                         glint_intensity = 0.7,
+                         glint2        = False,
+                         glint2_intensity = 0.85,
+                         bg_color      = (0, 0, 0, 0),
+                         progress_cb   = None):
     img = Image.open(img_path).convert("RGBA")
     if crop_margin >= 0:
         img = autocrop_rgba(img, margin=crop_margin)
@@ -285,8 +354,11 @@ def make_3d_spin_frames(img_path,
             face = img.resize((face_w, face_h), Image.LANCZOS)
             if not facing_front and not flip_back:
                 face = face.transpose(Image.FLIP_LEFT_RIGHT)
-            fa  = np.array(face).astype(np.float32)
-            fa  = fa.astype(np.uint8)
+            fa  = np.array(face, dtype=np.uint8).copy()
+            if glint:
+                fa = apply_glint(fa, theta, intensity=glint_intensity)
+            if glint2:
+                fa = apply_glint_cel(fa, theta, intensity=glint2_intensity)
             px  = max(0, min(CW - face_w, cx - face_w // 2))
             py  = max(0, min(CH - face_h, cy - face_h // 2))
             ey2 = min(py + face_h, CH); ex2 = min(px + face_w, CW)
@@ -597,14 +669,34 @@ class TelegramMaker(tk.Tk):
                        variable=self._spin_flip_var,
                        bg=BG1, fg=FG, selectcolor=BG0,
                        activebackground=BG1, font=FONT).grid(
-            row=17, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            row=17, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        # Glint effect (auto-exclusive radio buttons)
+        tk.Label(left, text="Glint:", bg=BG1, fg=FG2, font=FONT).grid(
+            row=18, column=0, sticky="w", pady=(4,0))
+        self._spin_glint_mode = tk.StringVar(value="none")
+        gf = tk.Frame(left, bg=BG1)
+        gf.grid(row=19, column=0, columnspan=2, sticky="w", pady=(2,4))
+        for val, txt in [("none","Off"),("soft","Soft"),("cel","Cel")]:
+            tk.Radiobutton(gf, text=txt, variable=self._spin_glint_mode, value=val,
+                           bg=BG1, fg=FG, selectcolor=BG0,
+                           activebackground=BG1, font=FONT).pack(side="left", padx=(0,8))
+        self._spin_glint_int_var = tk.IntVar(value=75)
+        tk.Label(left, text="Intensity:", bg=BG1, fg=FG2, font=FONT).grid(
+            row=20, column=0, sticky="w")
+        tk.Label(left, textvariable=self._spin_glint_int_var, bg=BG1, fg=FG,
+                 font=FONT, width=4).grid(row=20, column=1, sticky="e")
+        ttk.Scale(left, from_=10, to=100, variable=self._spin_glint_int_var,
+                  orient="horizontal", length=220,
+                  command=lambda v: self._spin_glint_int_var.set(int(float(v)))).grid(
+            row=21, column=0, columnspan=2, sticky="ew", pady=(2, 8))
 
         # Output mode
         tk.Label(left, text="Output:", bg=BG1, fg=FG2, font=FONT).grid(
-            row=18, column=0, sticky="w")
+            row=22, column=0, sticky="w")
         self._spin_out_var = tk.StringVar(value="sticker")
         out_frame = tk.Frame(left, bg=BG1)
-        out_frame.grid(row=19, column=0, columnspan=2, sticky="w", pady=(2, 10))
+        out_frame.grid(row=23, column=0, columnspan=2, sticky="w", pady=(2, 10))
         for val, txt in [("sticker", "Sticker 512px"), ("emoji", "Emoji 100px"), ("gif", "GIF")]:
             tk.Radiobutton(out_frame, text=txt, variable=self._spin_out_var, value=val,
                            bg=BG1, fg=FG, selectcolor=BG0,
@@ -614,20 +706,20 @@ class TelegramMaker(tk.Tk):
         self._spin_gen_btn = tk.Button(left, text="▶  Generate",
             bg=ACC2, fg="#0a1a12", font=FONT_BOLD, relief="flat",
             padx=10, pady=7, cursor="hand2", command=self._spin_generate)
-        self._spin_gen_btn.grid(row=20, column=0, columnspan=2, sticky="ew", pady=(4, 4))
+        self._spin_gen_btn.grid(row=24, column=0, columnspan=2, sticky="ew", pady=(4, 4))
 
         # Save button
         self._spin_save_btn = tk.Button(left, text="💾  Save…",
             bg=BG2, fg=FG, font=FONT, relief="flat",
             padx=10, pady=5, cursor="hand2", state="disabled",
             command=self._spin_save)
-        self._spin_save_btn.grid(row=21, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self._spin_save_btn.grid(row=25, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
         # Progress
         self._spin_prog = ttk.Progressbar(left, length=220, mode="determinate")
-        self._spin_prog.grid(row=22, column=0, columnspan=2, sticky="ew", pady=(8, 2))
+        self._spin_prog.grid(row=26, column=0, columnspan=2, sticky="ew", pady=(8, 2))
         self._spin_status = tk.Label(left, text="Ready", bg=BG1, fg=FG2, font=FONT)
-        self._spin_status.grid(row=23, column=0, columnspan=2, sticky="w")
+        self._spin_status.grid(row=27, column=0, columnspan=2, sticky="w")
 
         # RIGHT: preview
         right = tk.Frame(tab2, bg=BG1, padx=10, pady=10)
@@ -699,11 +791,13 @@ class TelegramMaker(tk.Tk):
         thick     = self._spin_thick_var.get()
         opacity   = self._spin_opacity_var.get() / 100.0
         tilt      = self._spin_tilt_var.get()
-        edge_col    = self.SPIN_EDGE_COLORS.get(self._spin_edge_var.get(), (5, 5, 5))
-        flip        = self._spin_flip_var.get()
-        crop_raw    = self._spin_crop_var.get()
-        crop_margin = -1 if crop_raw == "No crop" else int(crop_raw.split()[0])
-        img_path    = self._spin_img_path
+        edge_col      = self.SPIN_EDGE_COLORS.get(self._spin_edge_var.get(), (5, 5, 5))
+        flip          = self._spin_flip_var.get()
+        glint_mode    = self._spin_glint_mode.get()
+        glint_int     = self._spin_glint_int_var.get() / 100.0
+        crop_raw      = self._spin_crop_var.get()
+        crop_margin   = -1 if crop_raw == "No crop" else int(crop_raw.split()[0])
+        img_path      = self._spin_img_path
 
         def progress_cb(i, total):
             pct = int(100 * i / total)
@@ -720,6 +814,10 @@ class TelegramMaker(tk.Tk):
                     tilt_deg=tilt,
                     flip_back=flip,
                     crop_margin=crop_margin,
+                    glint=(glint_mode == "soft"),
+                    glint_intensity=glint_int,
+                    glint2=(glint_mode == "cel"),
+                    glint2_intensity=glint_int,
                     progress_cb=progress_cb,
                 )
                 self._spin_q.put(("done", frames))
