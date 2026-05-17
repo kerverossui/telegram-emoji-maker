@@ -232,10 +232,12 @@ def make_3d_spin_frames(img_path,
                          edge_opacity = 1.0,
                          tilt_deg     = 15,
                          flip_back    = False,
+                         crop_margin  = 4,
                          bg_color     = (0, 0, 0, 0),
                          progress_cb  = None):
     img = Image.open(img_path).convert("RGBA")
-    img = autocrop_rgba(img)
+    if crop_margin >= 0:
+        img = autocrop_rgba(img, margin=crop_margin)
     W, H = img.size
 
     tilt    = math.radians(tilt_deg)
@@ -319,7 +321,8 @@ def make_3d_spin_frames(img_path,
                 rim_start_arr = sl_canvas - rim_w
                 t_shade = 1.0 - np.linspace(0, 1, rim_w)
 
-            bright_v = np.maximum(0.10, np.cos((1.0 - t_shade) * math.pi / 2))                        * (0.45 + 0.55 * abs(sin_t))
+            bright_v = np.maximum(0.10, np.cos((1.0 - t_shade) * math.pi / 2)) \
+                       * (0.45 + 0.55 * abs(sin_t))
             rim_rgb  = np.clip(ec[np.newaxis, :] * bright_v[:, np.newaxis],
                                0, 255).astype(np.uint8)
             rim_a    = int(255 * edge_opacity)
@@ -357,11 +360,33 @@ def spin_frames_to_webm(frames, out_path, fps=24, size_px=512, max_kb=256):
     """Save 3D spin RGBA frames as VP9 WebM for Telegram."""
     tmp = tempfile.mkdtemp()
     try:
-        max_w = max(f.width  for f in frames)
-        max_h = max(f.height for f in frames)
+        # Compute tight bounding box across ALL frames so crop is consistent
+        min_l = frames[0].width;  min_t = frames[0].height
+        max_r = 0;                max_b = 0
+        for f in frames:
+            arr   = np.array(f)
+            alpha = arr[:, :, 3]
+            cols  = np.any(alpha > 0, axis=0)
+            rows  = np.any(alpha > 0, axis=1)
+            if cols.any():
+                l = int(np.argmax(cols))
+                r = int(len(cols) - np.argmax(cols[::-1]))
+                t = int(np.argmax(rows))
+                b = int(len(rows) - np.argmax(rows[::-1]))
+                min_l = min(min_l, l); min_t = min(min_t, t)
+                max_r = max(max_r, r); max_b = max(max_b, b)
+        # Add 2px safety margin
+        min_l = max(0, min_l - 2);  min_t = max(0, min_t - 2)
+        max_r = min(frames[0].width,  max_r + 2)
+        max_b = min(frames[0].height, max_b + 2)
+        crop_box = (min_l, min_t, max_r, max_b)
+
+        cw = max_r - min_l
+        ch = max_b - min_t
         for i, f in enumerate(frames):
-            canvas = Image.new("RGBA", (max_w, max_h), (0, 0, 0, 0))
-            canvas.paste(f, ((max_w - f.width) // 2, (max_h - f.height) // 2))
+            cropped = f.crop(crop_box)
+            canvas  = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+            canvas.paste(cropped, (0, 0), cropped)
             canvas.save(os.path.join(tmp, f"frame_{i:04d}.png"), "PNG")
         pattern = os.path.join(tmp, "frame_%04d.png")
         size    = f"{size_px}:{size_px}"
@@ -517,46 +542,54 @@ class TelegramMaker(tk.Tk):
                                        width=24, anchor="w", padx=6)
         self._spin_file_lbl.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 6))
         self._btn(left, "Browse…", self._spin_browse, ACC).grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+            row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+
+        # Crop margin
+        tk.Label(left, text="Crop margin:", bg=BG1, fg=FG2, font=FONT).grid(
+            row=3, column=0, sticky="w", pady=(4,0))
+        self._spin_crop_var = tk.StringVar(value="4 px")
+        ttk.Combobox(left, textvariable=self._spin_crop_var, state="readonly",
+                     values=["No crop"] + [f"{i} px" for i in range(0, 26)],
+                     width=8).grid(row=3, column=1, sticky="e", pady=(4,0))
 
         # Frames
         self._spin_frames_var = tk.IntVar(value=36)
-        lbl("Frames:", 3); val_lbl(self._spin_frames_var, 3)
-        slider(self._spin_frames_var, 12, 72, 3,
+        lbl("Frames:", 5); val_lbl(self._spin_frames_var, 5)
+        slider(self._spin_frames_var, 12, 72, 5,
                cmd=lambda v: self._spin_frames_var.set(int(float(v))))
 
         # Thickness
         self._spin_thick_var = tk.IntVar(value=20)
-        lbl("Thickness px:", 5); val_lbl(self._spin_thick_var, 5)
-        slider(self._spin_thick_var, 2, 200, 5,
+        lbl("Thickness px:", 7); val_lbl(self._spin_thick_var, 7)
+        slider(self._spin_thick_var, 2, 200, 7,
                cmd=lambda v: self._spin_thick_var.set(int(float(v))))
 
         # Edge opacity
         self._spin_opacity_var = tk.IntVar(value=100)
-        lbl("Edge opacity %:", 7); val_lbl(self._spin_opacity_var, 7)
-        slider(self._spin_opacity_var, 0, 100, 7,
+        lbl("Edge opacity %:", 9); val_lbl(self._spin_opacity_var, 9)
+        slider(self._spin_opacity_var, 0, 100, 9,
                cmd=lambda v: self._spin_opacity_var.set(int(float(v))))
 
         # Tilt
         self._spin_tilt_var = tk.IntVar(value=15)
-        lbl("Tilt °:", 9); val_lbl(self._spin_tilt_var, 9)
-        slider(self._spin_tilt_var, 0, 40, 9,
+        lbl("Tilt °:", 11); val_lbl(self._spin_tilt_var, 11)
+        slider(self._spin_tilt_var, 0, 40, 11,
                cmd=lambda v: self._spin_tilt_var.set(int(float(v))))
 
         # FPS
         self._spin_fps_var = tk.IntVar(value=24)
-        lbl("FPS:", 11); val_lbl(self._spin_fps_var, 11)
-        slider(self._spin_fps_var, 8, 50, 11,
+        lbl("FPS:", 13); val_lbl(self._spin_fps_var, 13)
+        slider(self._spin_fps_var, 8, 50, 13,
                cmd=lambda v: self._spin_fps_var.set(int(float(v))))
 
         # Edge color
         tk.Label(left, text="Edge color:", bg=BG1, fg=FG2, font=FONT).grid(
-            row=13, column=0, sticky="w", pady=(8, 0))
+            row=15, column=0, sticky="w", pady=(8, 0))
         self._spin_edge_var = tk.StringVar(value="Black")
         edge_cb = ttk.Combobox(left, textvariable=self._spin_edge_var, state="readonly",
                                values=["Black", "Dark gray", "White",
                                        "Gold", "Silver", "Red", "Blue"], width=14)
-        edge_cb.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        edge_cb.grid(row=16, column=0, columnspan=2, sticky="ew", pady=(2, 6))
 
         # Flip back face
         self._spin_flip_var = tk.BooleanVar(value=False)
@@ -564,14 +597,14 @@ class TelegramMaker(tk.Tk):
                        variable=self._spin_flip_var,
                        bg=BG1, fg=FG, selectcolor=BG0,
                        activebackground=BG1, font=FONT).grid(
-            row=15, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            row=17, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         # Output mode
         tk.Label(left, text="Output:", bg=BG1, fg=FG2, font=FONT).grid(
-            row=16, column=0, sticky="w")
+            row=18, column=0, sticky="w")
         self._spin_out_var = tk.StringVar(value="sticker")
         out_frame = tk.Frame(left, bg=BG1)
-        out_frame.grid(row=17, column=0, columnspan=2, sticky="w", pady=(2, 10))
+        out_frame.grid(row=19, column=0, columnspan=2, sticky="w", pady=(2, 10))
         for val, txt in [("sticker", "Sticker 512px"), ("emoji", "Emoji 100px"), ("gif", "GIF")]:
             tk.Radiobutton(out_frame, text=txt, variable=self._spin_out_var, value=val,
                            bg=BG1, fg=FG, selectcolor=BG0,
@@ -581,20 +614,20 @@ class TelegramMaker(tk.Tk):
         self._spin_gen_btn = tk.Button(left, text="▶  Generate",
             bg=ACC2, fg="#0a1a12", font=FONT_BOLD, relief="flat",
             padx=10, pady=7, cursor="hand2", command=self._spin_generate)
-        self._spin_gen_btn.grid(row=18, column=0, columnspan=2, sticky="ew", pady=(4, 4))
+        self._spin_gen_btn.grid(row=20, column=0, columnspan=2, sticky="ew", pady=(4, 4))
 
         # Save button
         self._spin_save_btn = tk.Button(left, text="💾  Save…",
             bg=BG2, fg=FG, font=FONT, relief="flat",
             padx=10, pady=5, cursor="hand2", state="disabled",
             command=self._spin_save)
-        self._spin_save_btn.grid(row=19, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self._spin_save_btn.grid(row=21, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
         # Progress
         self._spin_prog = ttk.Progressbar(left, length=220, mode="determinate")
-        self._spin_prog.grid(row=20, column=0, columnspan=2, sticky="ew", pady=(8, 2))
+        self._spin_prog.grid(row=22, column=0, columnspan=2, sticky="ew", pady=(8, 2))
         self._spin_status = tk.Label(left, text="Ready", bg=BG1, fg=FG2, font=FONT)
-        self._spin_status.grid(row=21, column=0, columnspan=2, sticky="w")
+        self._spin_status.grid(row=23, column=0, columnspan=2, sticky="w")
 
         # RIGHT: preview
         right = tk.Frame(tab2, bg=BG1, padx=10, pady=10)
@@ -666,9 +699,11 @@ class TelegramMaker(tk.Tk):
         thick     = self._spin_thick_var.get()
         opacity   = self._spin_opacity_var.get() / 100.0
         tilt      = self._spin_tilt_var.get()
-        edge_col  = self.SPIN_EDGE_COLORS.get(self._spin_edge_var.get(), (5, 5, 5))
-        flip      = self._spin_flip_var.get()
-        img_path  = self._spin_img_path
+        edge_col    = self.SPIN_EDGE_COLORS.get(self._spin_edge_var.get(), (5, 5, 5))
+        flip        = self._spin_flip_var.get()
+        crop_raw    = self._spin_crop_var.get()
+        crop_margin = -1 if crop_raw == "No crop" else int(crop_raw.split()[0])
+        img_path    = self._spin_img_path
 
         def progress_cb(i, total):
             pct = int(100 * i / total)
@@ -684,6 +719,7 @@ class TelegramMaker(tk.Tk):
                     edge_opacity=opacity,
                     tilt_deg=tilt,
                     flip_back=flip,
+                    crop_margin=crop_margin,
                     progress_cb=progress_cb,
                 )
                 self._spin_q.put(("done", frames))
@@ -709,10 +745,20 @@ class TelegramMaker(tk.Tk):
             self.update()
             def worker_gif():
                 try:
+                    # Tight bounding box crop across all frames
+                    ml=self._spin_frames[0].width; mt=self._spin_frames[0].height; mr=0; mb=0
+                    for fr in self._spin_frames:
+                        aa=np.array(fr)[:,:,3]
+                        rc=np.any(aa>0,axis=0); rr=np.any(aa>0,axis=1)
+                        if rc.any():
+                            ml=min(ml,int(np.argmax(rc))); mt=min(mt,int(np.argmax(rr)))
+                            mr=max(mr,int(len(rc)-np.argmax(rc[::-1]))); mb=max(mb,int(len(rr)-np.argmax(rr[::-1])))
+                    box=(max(0,ml-2),max(0,mt-2),min(self._spin_frames[0].width,mr+2),min(self._spin_frames[0].height,mb+2))
+                    cropped=[fr.crop(box) for fr in self._spin_frames]
                     dur = max(20, int(1000 / fps))
-                    self._spin_frames[0].save(
+                    cropped[0].save(
                         path, save_all=True,
-                        append_images=self._spin_frames[1:],
+                        append_images=cropped[1:],
                         loop=0, duration=dur, disposal=2, optimize=False)
                     kb = os.path.getsize(path) / 1024
                     self._spin_q.put(("status", f"Saved {kb:.0f} KB", ACC2))
