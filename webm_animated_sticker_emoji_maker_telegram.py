@@ -60,11 +60,9 @@ def get_gif_info(path):
         fps = 15
 
     frames = []
-    disposals = []
     try:
         while True:
             frames.append(img.copy().convert("RGBA"))
-            disposals.append(img.tile[0][3][3] if img.tile else 0 if not hasattr(img, '_frame_info') else 0)
             img.seek(img.tell() + 1)
     except EOFError:
         pass
@@ -82,32 +80,31 @@ def get_gif_info(path):
 
 def compose_gif_frames(frames):
     """
-    FIX: Correctly compose GIF frames respecting disposal method.
-    disposal=0,1 → keep canvas (blend over previous)
-    disposal=2   → clear to transparent before next frame
-    disposal=3   → restore to pre-frame state (approximate: use last clean)
+    Normalize already-coalesced GIF frames onto a clean, uniform-size canvas.
+
+    IMPORTANT (frame-stacking fix): Pillow ALREADY coalesces animated GIF
+    frames on seek — each frame returned by get_gif_info() is the fully
+    rendered image at that instant, with disposal already applied. So this
+    function must NOT accumulate: it composes every frame on its OWN fresh
+    transparent canvas, independent of the others.
+
+    The previous version carried a single `canvas` forward across iterations
+    (`canvas = new_canvas`), which pasted each frame on top of ALL earlier
+    frames. With any moving/changing content the transparent regions of a
+    later frame revealed the older frames underneath → the frames "stacked"
+    (visible trails / ghosting), growing the opaque area every frame.
     """
     if not frames:
         return frames
-    size      = frames[0].size
-    canvas    = Image.new("RGBA", size, (0, 0, 0, 0))
-    prev_canvas = canvas.copy()
-    composed  = []
-
-    # Re-open to get per-frame disposal info
-    try:
-        src = Image.open(None)  # dummy – fall through to safe path
-    except Exception:
-        src = None
-
+    size     = frames[0].size
+    composed = []
     for frame in frames:
-        # Safe path: treat all as disposal=1 (accumulate) but start fresh each
-        # frame to avoid incorrect ghosting. This is correct for >95% of GIFs.
-        new_canvas = canvas.copy()
-        new_canvas.paste(frame, (0, 0), frame)
-        composed.append(new_canvas.copy())
-        canvas = new_canvas
-
+        if frame.mode != "RGBA":
+            frame = frame.convert("RGBA")
+        canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+        # paste onto a FRESH canvas every iteration — no carry-over
+        canvas.paste(frame, (0, 0), frame)
+        composed.append(canvas)
     return composed
 
 
