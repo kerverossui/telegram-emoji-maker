@@ -596,18 +596,24 @@ def spin_frames_to_webm(frames, out_path, fps=24, size_px=512, max_kb=256):
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 
-BG0  = "#1a1c1f"
-BG1  = "#22252a"
-BG2  = "#2a2e35"
-ACC  = "#5b8dee"
-ACC2 = "#3ecf8e"
-WARN = "#f0a500"
-ERR  = "#e05c5c"
-FG   = "#e8eaf0"
-FG2  = "#8b90a0"
+# ── Paleta monitor clínico ──────────────────────────────────────────────────
+#   Estética de monitor de paciente: negro absoluto, color saturado solo en
+#   datos y estados, codificación semántica fija. El color NUNCA rellena un
+#   control — vive en texto y bordes. Sin gradientes, sombras ni blur.
+BG0  = "#000000"   # negro absoluto — fondo principal
+BG1  = "#111111"   # gris carbón — paneles elevados, preview
+BG2  = "#1C1C1C"   # gris oscuro — campos, celdas, botones, listas
+BORDER = "#2A2A2A" # gris muy oscuro — separadores, bordes finos
+ACC  = "#00FFFF"   # cian eléctrico — acento primario / foco
+ACC2 = "#00FF00"   # verde néon — éxito / estado OK
+WARN = "#FFFF00"   # amarillo puro — advertencia / en proceso
+ERR  = "#FF4040"   # rojo alarma — error / cancelar (AA sobre fondos oscuros)
+FG   = "#FFFFFF"   # blanco — texto principal, valores
+FG2  = "#C8C8C8"   # gris claro legible — texto secundario, etiquetas
+FG3  = "#909090"   # gris medio — subtexto fino, placeholders
 FONT      = ("Segoe UI", 10)
 FONT_BOLD = ("Segoe UI", 10, "bold")
-FONT_BIG  = ("Segoe UI", 13, "bold")
+FONT_BIG  = ("Segoe UI", 14, "bold")   # título compacto (no dominante)
 FONT_MONO = ("Consolas", 9)
 
 
@@ -704,9 +710,12 @@ class TelegramMaker(tk.Tk):
         hdr = tk.Frame(self, bg=BG0)
         hdr.pack(fill="x", padx=24, pady=(20, 6))
         tk.Label(hdr, text="Telegram WebM Maker",
-                 font=("Segoe UI", 18, "bold"), fg=FG, bg=BG0).pack(side="left")
+                 font=("Segoe UI", 14, "bold"), fg=FG, bg=BG0).pack(side="left")
         tk.Label(hdr, text="v2.1", font=("Segoe UI", 9),
                  fg=ACC, bg=BG0).pack(side="left", padx=(8, 0), pady=(6, 0))
+
+        # Línea de acento cian bajo el header (separador del sistema)
+        tk.Frame(self, bg=ACC, height=2).pack(fill="x")
 
         if not self._ffmpeg_ok:
             tk.Label(self, text="⚠  FFmpeg not found — install it and add to PATH",
@@ -719,7 +728,37 @@ class TelegramMaker(tk.Tk):
                         padding=[14, 6], font=FONT)
         style.map("TNotebook.Tab",
                   background=[("selected", BG1)],
-                  foreground=[("selected", FG)])
+                  foreground=[("selected", ACC)])
+
+        # ── Estilo ttk monitor clínico: troughs/sliders/combos oscuros ──
+        # El tema "default" de ttk usa grises claros brillantes que rompen
+        # la estética oscura. Se fuerza fondo oscuro y acento cian.
+        style.configure("Horizontal.TScale",
+                        background=BG0, troughcolor=BG2,
+                        borderwidth=0, lightcolor=BG2, darkcolor=BG2)
+        style.map("Horizontal.TScale",
+                  background=[("active", BG0)])
+        style.configure("TCombobox",
+                        fieldbackground=BG2, background=BG2,
+                        foreground=FG, arrowcolor=FG2,
+                        bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER,
+                        selectbackground=BG2, selectforeground=ACC)
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", BG2)],
+                  foreground=[("readonly", FG)],
+                  arrowcolor=[("active", ACC)])
+        style.configure("TProgressbar",
+                        background=ACC, troughcolor=BG2,
+                        borderwidth=0, lightcolor=ACC, darkcolor=ACC)
+        style.configure("Vertical.TScrollbar",
+                        background=BG2, troughcolor=BG0, bordercolor=BG0,
+                        arrowcolor=FG2, lightcolor=BG2, darkcolor=BG2)
+        style.configure("Horizontal.TScrollbar",
+                        background=BG2, troughcolor=BG0, bordercolor=BG0,
+                        arrowcolor=FG2, lightcolor=BG2, darkcolor=BG2)
+        style.map("Vertical.TScrollbar",   background=[("active", BORDER)])
+        style.map("Horizontal.TScrollbar", background=[("active", BORDER)])
+
         self._notebook = ttk.Notebook(self)
         self._notebook.pack(fill="both", expand=True, padx=24, pady=(0, 8))
 
@@ -824,9 +863,10 @@ class TelegramMaker(tk.Tk):
                            font=FONT).pack(side="left", padx=(0, 12))
 
         self._conv_btn = tk.Button(right, text="▶  Convert",
-            bg=ACC, fg=FG, font=("Segoe UI", 11, "bold"),
-            relief="flat", cursor="hand2", pady=10,
-            activebackground="#4070cc", activeforeground=FG,
+            bg=BG2, fg=ACC, font=("Segoe UI", 11, "bold"),
+            relief="flat", cursor="hand2", pady=10, bd=0,
+            highlightthickness=1, highlightbackground=ACC, highlightcolor=ACC,
+            activebackground=BORDER, activeforeground=ACC,
             command=self._start_conversion)
         self._conv_btn.pack(fill="x", pady=(0, 8))
 
@@ -1033,7 +1073,9 @@ class TelegramMaker(tk.Tk):
 
         # Generate button
         self._spin_gen_btn = tk.Button(left, text="▶  Generate",
-            bg=ACC2, fg="#0a1a12", font=FONT_BOLD, relief="flat",
+            bg=BG2, fg=ACC2, font=FONT_BOLD, relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=ACC2, highlightcolor=ACC2,
+            activebackground=BORDER, activeforeground=ACC2,
             padx=10, pady=7, cursor="hand2", command=self._spin_generate)
         self._spin_gen_btn.grid(row=31, column=0, columnspan=2, sticky="ew", pady=(4, 4))
 
@@ -1304,12 +1346,26 @@ class TelegramMaker(tk.Tk):
 
     # ── Helpers ───────────────────────────────────────────────────────
     def _btn(self, parent, text, cmd, bg):
+        """Boton estilo monitor clínico. El color NUNCA rellena el control.
+
+        El 4º argumento se reinterpreta como ROL, no como relleno:
+          - bg == BG2  -> boton normal: fondo oscuro, texto gris claro.
+          - bg == ACC/ACC2/...  -> boton PRIMARIO: fondo oscuro, texto y
+            borde de ese color de acento. El color vive en texto+borde.
+        Mantiene la firma original para no romper las llamadas existentes.
+        """
+        if bg == BG2:
+            return tk.Button(parent, text=text, command=cmd,
+                             bg=BG2, fg=FG2, relief="flat", bd=0,
+                             font=FONT, padx=10, pady=5, cursor="hand2",
+                             activebackground=BORDER, activeforeground=FG)
+        # Primario: el color pasa a texto + borde fino, fondo oscuro
         return tk.Button(parent, text=text, command=cmd,
-                         bg=bg, fg=FG, relief="flat",
-                         font=FONT, padx=10, pady=5,
-                         cursor="hand2",
-                         activebackground=ACC,
-                         activeforeground=FG)
+                         bg=BG2, fg=bg, relief="flat", bd=0,
+                         font=FONT, padx=10, pady=5, cursor="hand2",
+                         highlightthickness=1, highlightbackground=bg,
+                         highlightcolor=bg,
+                         activebackground=BORDER, activeforeground=bg)
 
     def _on_list_resize(self, e):
         self._list_canvas.configure(scrollregion=self._list_canvas.bbox("all"))
@@ -1527,21 +1583,21 @@ def show_fatal_error(tb: str):
     try:
         root = tk.Tk()
         root.title("CRITICAL ERROR — Telegram WebM Maker")
-        root.configure(bg="#0d0d0d")
+        root.configure(bg="#000000")
         root.geometry("780x460")
         root.resizable(True, True)
 
         tk.Label(root, text="The application crashed before starting.",
-                 fg="#e05c5c", bg="#0d0d0d",
+                 fg="#FF4040", bg="#000000",
                  font=("Consolas", 11, "bold")).pack(pady=(16, 4))
         tk.Label(root, text=f"Error log saved to:  {log_path}",
-                 fg="#888888", bg="#0d0d0d",
+                 fg="#909090", bg="#000000",
                  font=("Consolas", 9)).pack(pady=(0, 10))
 
-        frame = tk.Frame(root, bg="#0d0d0d")
+        frame = tk.Frame(root, bg="#000000")
         frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
-        text = tk.Text(frame, bg="#0d0d0d", fg="#00ff88",
+        text = tk.Text(frame, bg="#000000", fg="#00FF00",
                        font=("Consolas", 9), relief="flat", wrap="none", bd=0)
         sb_y = ttk.Scrollbar(frame, orient="vertical",   command=text.yview)
         sb_x = ttk.Scrollbar(frame, orient="horizontal", command=text.xview)
@@ -1552,15 +1608,16 @@ def show_fatal_error(tb: str):
         text.insert("1.0", tb)
         text.config(state="disabled")
 
-        btn_row = tk.Frame(root, bg="#0d0d0d")
+        btn_row = tk.Frame(root, bg="#000000")
         btn_row.pack(fill="x", padx=16, pady=(0, 14))
         tk.Button(btn_row, text="Copy to clipboard",
-                  bg="#2a2e35", fg="white", relief="flat",
+                  bg="#1C1C1C", fg="#FFFFFF", relief="flat",
                   padx=10, pady=6, cursor="hand2",
                   command=lambda: (root.clipboard_clear(),
                                    root.clipboard_append(tb))).pack(side="left")
         tk.Button(btn_row, text="Close",
-                  bg="#e05c5c", fg="white", relief="flat",
+                  bg="#1C1C1C", fg="#FF4040", relief="flat", bd=0,
+                  highlightthickness=1, highlightbackground="#FF4040",
                   padx=10, pady=6, cursor="hand2",
                   command=root.destroy).pack(side="right")
         root.mainloop()
