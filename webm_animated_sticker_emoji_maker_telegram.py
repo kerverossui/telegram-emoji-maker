@@ -404,6 +404,10 @@ def make_3d_spin_frames(img_path,
                          glint2_intensity = 0.85,
                          glint2_speed     = 1.0,
                          edge_dwell       = 0.0,   # 0=uniform, 1=max slowdown at edge-on
+                         edge_shade       = 0.0,   # 0=solid rim color, >0=subtle cylinder shading
+                         edge_glint       = False, # metallic moving sheen on the rim
+                         edge_glint_intensity = 0.8,
+                         edge_glint_speed = 1.0,
                          bg_color         = (0, 0, 0, 0),
                          progress_cb      = None):
     """
@@ -453,13 +457,22 @@ def make_3d_spin_frames(img_path,
         sin_t        = math.sin(theta)
         x_scale      = abs(cos_t)
         facing_front = cos_t >= 0
-        rim_on_right = sin_t > 0
 
         face_h  = max(1, int(H * y_scale))
         face_w  = max(1, int(W * x_scale)) if x_scale > 0.005 else 0
         scale_y = face_h / H
 
         rim_w     = max(1, int(thick_px * abs(sin_t)))
+
+        # Thickness parallax: the visible face slides laterally by (t/2)·sinθ·sign(cosθ),
+        # exactly as a real coin's front/back surface (offset ±t/2 in depth) projects
+        # when rotated about the vertical axis. The rim (coin's side) fills the
+        # OPPOSITE side. This is what makes the spin read as a 3D disc turning in
+        # depth instead of a flat card being squashed.  (Verified vs a 3D render.)
+        face_shift  = (thick_px * 0.5) * sin_t * (1.0 if facing_front else -1.0)
+        shift_i     = int(round(face_shift))
+        rim_on_right = face_shift < 0
+
         frame_arr = np.zeros((CH, CW, 4), dtype=np.uint8)
 
         # Face
@@ -472,7 +485,7 @@ def make_3d_spin_frames(img_path,
                 fa = apply_glint(fa, theta, intensity=glint_intensity, speed=glint2_speed)
             if glint2:
                 fa = apply_glint_cel(fa, theta, intensity=glint2_intensity, speed=glint2_speed)
-            px_ = max(0, min(CW - face_w, cx - face_w // 2))
+            px_ = max(0, min(CW - face_w, cx - face_w // 2 + shift_i))
             py_ = max(0, min(CH - face_h, cy - face_h // 2))
             ey2 = min(py_ + face_h, CH); ex2 = min(px_ + face_w, CW)
             fy2 = ey2 - py_;             fx2 = ex2 - px_
@@ -493,7 +506,7 @@ def make_3d_spin_frames(img_path,
 
             eff_face_w  = max(1, face_w)
             scale_x     = eff_face_w / W
-            face_anchor = cx - eff_face_w // 2
+            face_anchor = cx - eff_face_w // 2 + shift_i
 
             if rim_on_right:
                 sr_canvas     = face_anchor + (sr_arr * scale_x).astype(np.int32)
@@ -506,11 +519,35 @@ def make_3d_spin_frames(img_path,
                 rim_start_arr = sl_canvas - rim_w
                 t_shade = 1.0 - np.linspace(0, 1, rim_w)
 
-            bright_v = np.maximum(0.10, np.cos((1.0 - t_shade) * math.pi / 2)) \
-                       * (0.45 + 0.55 * abs(sin_t))
-            rim_rgb  = np.clip(ec[np.newaxis, :] * bright_v[:, np.newaxis],
-                               0, 255).astype(np.uint8)
+            # SOLID rim: fill with the exact edge_color, no brightness gradient and
+            # no angle-dependent dimming. edge_shade>0 re-enables a subtle cylinder
+            # shade for those who want it; default 0.0 keeps the border a flat solid.
+            if edge_shade > 0.0:
+                bright_v = 1.0 - edge_shade * (
+                    1.0 - np.maximum(0.0, np.cos((1.0 - t_shade) * math.pi / 2)))
+                rim_rgb = np.clip(ec[np.newaxis, :] * bright_v[:, np.newaxis],
+                                  0, 255).astype(np.uint8)
+            else:
+                rim_rgb = np.tile(np.clip(ec, 0, 255).astype(np.uint8), (rim_w, 1))
             rim_a    = int(255 * edge_opacity)
+
+            # Metallic edge glint: a bright specular highlight that sweeps along the
+            # rim (vertically) in sync with the spin, plus a soft cross-width sheen.
+            # Simulates light sliding across a metal coin's milled edge.
+            edge_glint_on = edge_glint and edge_glint_intensity > 0.0
+            if edge_glint_on:
+                sweep   = ((theta * max(0.1, edge_glint_speed)) % (2 * math.pi)) / (2 * math.pi)
+                c1      = sweep * face_h
+                c2      = ((sweep + 0.5) % 1.0) * face_h
+                sig_y   = max(2.0, face_h * 0.14)
+                gv_all  = (np.exp(-0.5 * ((fy_arr - c1) / sig_y) ** 2)
+                           + 0.4 * np.exp(-0.5 * ((fy_arr - c2) / sig_y) ** 2))
+                gv_all  = np.clip(gv_all, 0.0, 1.0)
+                off_idx = np.arange(rim_w, dtype=np.float32)
+                sheen_w = np.exp(-0.5 * ((off_idx - rim_w * 0.5)
+                                         / max(1.0, rim_w * 0.55)) ** 2)
+                sheen_w = (0.45 + 0.55 * sheen_w).astype(np.float32)   # base + peak
+                white   = np.array([255.0, 255.0, 255.0], dtype=np.float32)
 
             for fi in range(face_h):
                 if not valid[fi]:
@@ -530,8 +567,15 @@ def make_3d_spin_frames(img_path,
                 mask = frame_arr[py2, cx0:cx0 + n, 3] < 128
                 if not mask.any():
                     continue
+                if edge_glint_on:
+                    ha      = np.clip(edge_glint_intensity * gv_all[fi] * sheen_w[off0:off1],
+                                      0.0, 1.0)[:, np.newaxis]
+                    base    = rim_rgb[off0:off1].astype(np.float32)
+                    row_rgb = (base * (1.0 - ha) + white * ha).astype(np.uint8)
+                else:
+                    row_rgb = rim_rgb[off0:off1]
                 frame_arr[py2, cx0:cx0 + n, :3] = np.where(
-                    mask[:, np.newaxis], rim_rgb[off0:off1],
+                    mask[:, np.newaxis], row_rgb,
                     frame_arr[py2, cx0:cx0 + n, :3])
                 frame_arr[py2, cx0:cx0 + n, 3] = np.where(
                     mask, rim_a, frame_arr[py2, cx0:cx0 + n, 3])
@@ -838,7 +882,7 @@ class TelegramMaker(tk.Tk):
                  fg=FG2, bg=BG1, anchor="w").grid(
                  row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
 
-        self._crop_var = tk.StringVar(value="0 px")
+        self._crop_var = tk.StringVar(value="1 px")
         tk.Label(opt, text="Transparent crop margin", fg=FG, bg=BG1,
                  font=FONT, anchor="w").grid(row=1, column=0, sticky="w", pady=3)
         ttk.Combobox(opt, textvariable=self._crop_var, state="readonly", width=14,
@@ -952,7 +996,7 @@ class TelegramMaker(tk.Tk):
         # Crop margin
         tk.Label(left, text="Crop margin:", bg=BG1, fg=FG2, font=FONT).grid(
             row=3, column=0, sticky="w", pady=(4, 0))
-        self._spin_crop_var = tk.StringVar(value="4 px")
+        self._spin_crop_var = tk.StringVar(value="1 px")
         ttk.Combobox(left, textvariable=self._spin_crop_var, state="readonly",
                      values=["No crop"] + [f"{i} px" for i in range(0, 26)],
                      width=8).grid(row=3, column=1, sticky="e", pady=(4, 0))
@@ -982,7 +1026,7 @@ class TelegramMaker(tk.Tk):
             row=9, column=0, columnspan=2, sticky="w", pady=(0, 4))
 
         # Thickness % (FIX: relative to image short side)
-        self._spin_thick_var = tk.DoubleVar(value=21.0)
+        self._spin_thick_var = tk.DoubleVar(value=25.0)
         lbl("Thickness (% of image):", 10); val_lbl(self._spin_thick_var, 10, "%")
         def _thick_changed(v):
             rv = round(float(v) * 2) / 2    # 0.5% steps
@@ -1012,14 +1056,33 @@ class TelegramMaker(tk.Tk):
         slider(self._spin_tilt_var, 0, 40, 18,
                cmd=lambda v: self._spin_tilt_var.set(int(float(v))))
 
-        # Edge color
+        # Edge color  (preset dropdown + HEX field — no picker)
         tk.Label(left, text="Edge color:", bg=BG1, fg=FG2, font=FONT).grid(
             row=20, column=0, sticky="w", pady=(8, 0))
+        ecf = tk.Frame(left, bg=BG1)
+        ecf.grid(row=21, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        ecf.columnconfigure(0, weight=1)
+
         self._spin_edge_var = tk.StringVar(value="Black")
-        ttk.Combobox(left, textvariable=self._spin_edge_var, state="readonly",
-                     values=["Black", "Dark gray", "White",
-                             "Gold", "Silver", "Red", "Blue"], width=14
-                     ).grid(row=21, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        edge_cb = ttk.Combobox(ecf, textvariable=self._spin_edge_var, state="readonly",
+                               values=list(self.SPIN_EDGE_COLORS.keys()) + ["Custom…"],
+                               width=14)
+        edge_cb.grid(row=0, column=0, columnspan=3, sticky="ew")
+        edge_cb.bind("<<ComboboxSelected>>", self._on_edge_preset)
+
+        row2 = tk.Frame(ecf, bg=BG1)
+        row2.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        tk.Label(row2, text="HEX:", bg=BG1, fg=FG2, font=FONT).pack(side="left")
+        self._spin_edge_hex_var = tk.StringVar(value="#050505")
+        hexe = tk.Entry(row2, textvariable=self._spin_edge_hex_var, width=10,
+                        bg=BG2, fg=FG, insertbackground=FG, relief="flat",
+                        font=FONT_MONO)
+        hexe.pack(side="left", padx=(4, 6))
+        hexe.bind("<FocusOut>", lambda e: self._update_edge_swatch())
+        hexe.bind("<Return>",   lambda e: self._update_edge_swatch())
+        self._spin_edge_swatch = tk.Label(row2, text="   ", bg="#050505",
+                                          relief="solid", bd=1)
+        self._spin_edge_swatch.pack(side="left", ipadx=8)
 
         # Flip back face
         self._spin_flip_var = tk.BooleanVar(value=False)
@@ -1060,12 +1123,29 @@ class TelegramMaker(tk.Tk):
                   command=lambda v: self._spin_glint_speed_var.set(int(float(v)))).grid(
             row=28, column=0, columnspan=2, sticky="ew", pady=(2, 8))
 
+        # Edge metallic glint (brillo metálico en el canto, como metal)
+        self._spin_edge_glint_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(left, text="Edge metal glint (canto metálico)",
+                       variable=self._spin_edge_glint_var,
+                       bg=BG1, fg=FG, selectcolor=BG0,
+                       activebackground=BG1, font=FONT).grid(
+            row=29, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        self._spin_edge_glint_int_var = tk.IntVar(value=20)
+        tk.Label(left, text="Edge glint intensity:", bg=BG1, fg=FG2, font=FONT).grid(
+            row=30, column=0, sticky="w")
+        tk.Label(left, textvariable=self._spin_edge_glint_int_var, bg=BG1, fg=FG,
+                 font=FONT, width=4).grid(row=30, column=1, sticky="e")
+        ttk.Scale(left, from_=10, to=100, variable=self._spin_edge_glint_int_var,
+                  orient="horizontal", length=220,
+                  command=lambda v: self._spin_edge_glint_int_var.set(int(float(v)))).grid(
+            row=31, column=0, columnspan=2, sticky="ew", pady=(2, 8))
+
         # Output mode
         tk.Label(left, text="Output:", bg=BG1, fg=FG2, font=FONT).grid(
-            row=29, column=0, sticky="w")
+            row=32, column=0, sticky="w")
         self._spin_out_var = tk.StringVar(value="gif")
         out_frame = tk.Frame(left, bg=BG1)
-        out_frame.grid(row=30, column=0, columnspan=2, sticky="w", pady=(2, 10))
+        out_frame.grid(row=33, column=0, columnspan=2, sticky="w", pady=(2, 10))
         for val, txt in [("sticker", "Sticker 512px"), ("emoji", "Emoji 100px"), ("gif", "GIF")]:
             tk.Radiobutton(out_frame, text=txt, variable=self._spin_out_var, value=val,
                            bg=BG1, fg=FG, selectcolor=BG0,
@@ -1077,18 +1157,18 @@ class TelegramMaker(tk.Tk):
             highlightthickness=1, highlightbackground=ACC2, highlightcolor=ACC2,
             activebackground=BORDER, activeforeground=ACC2,
             padx=10, pady=7, cursor="hand2", command=self._spin_generate)
-        self._spin_gen_btn.grid(row=31, column=0, columnspan=2, sticky="ew", pady=(4, 4))
+        self._spin_gen_btn.grid(row=34, column=0, columnspan=2, sticky="ew", pady=(4, 4))
 
         self._spin_save_btn = tk.Button(left, text="💾  Save…",
             bg=BG2, fg=FG, font=FONT, relief="flat",
             padx=10, pady=5, cursor="hand2", state="disabled",
             command=self._spin_save)
-        self._spin_save_btn.grid(row=32, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self._spin_save_btn.grid(row=35, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
         self._spin_prog = ttk.Progressbar(left, length=220, mode="determinate")
-        self._spin_prog.grid(row=33, column=0, columnspan=2, sticky="ew", pady=(8, 2))
+        self._spin_prog.grid(row=36, column=0, columnspan=2, sticky="ew", pady=(8, 2))
         self._spin_status = tk.Label(left, text="Ready", bg=BG1, fg=FG2, font=FONT)
-        self._spin_status.grid(row=34, column=0, columnspan=2, sticky="w")
+        self._spin_status.grid(row=37, column=0, columnspan=2, sticky="w")
 
         # RIGHT: preview
         right = tk.Frame(tab2, bg=BG1, padx=10, pady=10)
@@ -1114,14 +1194,95 @@ class TelegramMaker(tk.Tk):
     # ── 3D Spin helpers ───────────────────────────────────────────────
 
     SPIN_EDGE_COLORS = {
-        "Black":     (5,   5,   5),
-        "Dark gray": (40,  40,  40),
-        "White":     (220, 220, 220),
-        "Gold":      (180, 140, 30),
-        "Silver":    (160, 165, 170),
-        "Red":       (140, 20,  20),
-        "Blue":      (20,  40,  160),
+        # Neutros
+        "Black":      (5,   5,   5),
+        "Charcoal":   (30,  30,  30),
+        "Dark gray":  (60,  60,  60),
+        "Gray":       (110, 110, 110),
+        "Light gray": (180, 180, 180),
+        "White":      (235, 235, 235),
+        # Metales
+        "Gold":       (180, 140, 30),
+        "Brass":      (190, 160, 80),
+        "Bronze":     (140, 95,  40),
+        "Copper":     (184, 115, 51),
+        "Rose gold":  (200, 150, 130),
+        "Silver":     (160, 165, 170),
+        "Steel":      (110, 120, 130),
+        "Platinum":   (200, 205, 210),
+        # Cálidos
+        "Maroon":     (110, 20,  30),
+        "Crimson":    (180, 30,  50),
+        "Red":        (200, 30,  30),
+        "Ruby":       (155, 17,  55),
+        "Orange":     (220, 110, 20),
+        "Amber":      (220, 160, 40),
+        "Yellow":     (225, 200, 40),
+        # Verdes
+        "Olive":      (110, 110, 40),
+        "Green":      (40,  150, 60),
+        "Emerald":    (30,  160, 110),
+        "Lime":       (130, 200, 50),
+        "Mint":       (130, 210, 180),
+        "Teal":       (20,  140, 140),
+        # Fríos
+        "Cyan":       (40,  185, 205),
+        "Sky":        (90,  170, 230),
+        "Blue":       (30,  70,  200),
+        "Sapphire":   (30,  60,  150),
+        "Navy":       (20,  30,  80),
+        "Indigo":     (70,  40,  140),
+        # Púrpuras / rosas
+        "Purple":     (120, 45,  175),
+        "Violet":     (150, 90,  210),
+        "Magenta":    (200, 40,  160),
+        "Pink":       (225, 100, 160),
     }
+
+    @staticmethod
+    def _parse_hex(s):
+        """Parse '#RRGGBB' / 'RRGGBB' / '#RGB' → (r,g,b) ints, or None if invalid."""
+        if not s:
+            return None
+        s = s.strip().lstrip("#")
+        if len(s) == 3 and all(c in "0123456789abcdefABCDEF" for c in s):
+            s = "".join(c * 2 for c in s)
+        if len(s) != 6 or any(c not in "0123456789abcdefABCDEF" for c in s):
+            return None
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+
+    def _on_edge_preset(self, event=None):
+        """Preset chosen → fill HEX field. 'Custom…' just lets the user type a HEX."""
+        name = self._spin_edge_var.get()
+        if name == "Custom…":
+            return
+        rgb = self.SPIN_EDGE_COLORS.get(name)
+        if rgb:
+            self._spin_edge_hex_var.set("#%02X%02X%02X" % rgb)
+            self._update_edge_swatch()
+
+    def _update_edge_swatch(self):
+        """Reflect the HEX field in the swatch; normalise valid input to #RRGGBB and
+        keep the preset dropdown honest (show the matching preset name, else 'Custom…')."""
+        rgb = self._parse_hex(self._spin_edge_hex_var.get())
+        if rgb is None:
+            self._spin_edge_swatch.config(bg=ERR)   # invalid → red flag
+            return
+        hx = "#%02X%02X%02X" % rgb
+        if self._spin_edge_hex_var.get() != hx:
+            self._spin_edge_hex_var.set(hx)
+        self._spin_edge_swatch.config(bg=hx)
+        # sync the dropdown label to the colour without re-triggering anything
+        match = next((k for k, v in self.SPIN_EDGE_COLORS.items() if v == rgb), "Custom…")
+        if self._spin_edge_var.get() != match:
+            self._spin_edge_var.set(match)
+
+    def _resolve_edge_color(self):
+        """Final RGB for rendering: HEX field wins; fall back to preset, then black."""
+        rgb = self._parse_hex(self._spin_edge_hex_var.get())
+        if rgb is not None:
+            return rgb
+        return self.SPIN_EDGE_COLORS.get(self._spin_edge_var.get(), (5, 5, 5))
 
     def _spin_browse(self):
         path = filedialog.askopenfilename(
@@ -1163,11 +1324,13 @@ class TelegramMaker(tk.Tk):
         opacity   = self._spin_opacity_var.get() / 100.0
         tilt      = self._spin_tilt_var.get()
         edge_dwell = self._spin_dwell_var.get() / 100.0
-        edge_col  = self.SPIN_EDGE_COLORS.get(self._spin_edge_var.get(), (5, 5, 5))
+        edge_col  = self._resolve_edge_color()
         flip      = self._spin_flip_var.get()
         glint_mode    = self._spin_glint_mode.get()
         glint_int     = self._spin_glint_int_var.get() / 100.0
         glint2_speed  = self._spin_glint_speed_var.get()
+        edge_glint     = self._spin_edge_glint_var.get()
+        edge_glint_int = self._spin_edge_glint_int_var.get() / 100.0
         crop_raw      = self._spin_crop_var.get()
         crop_margin   = -1 if crop_raw == "No crop" else int(crop_raw.split()[0])
         img_path      = self._spin_img_path
@@ -1204,6 +1367,8 @@ class TelegramMaker(tk.Tk):
                     glint2_intensity = glint_int,
                     glint2_speed     = glint2_speed,
                     edge_dwell       = edge_dwell,
+                    edge_glint           = edge_glint,
+                    edge_glint_intensity = edge_glint_int,
                     progress_cb      = progress_cb,
                 )
                 self._spin_q.put(("done", frames, fps))
