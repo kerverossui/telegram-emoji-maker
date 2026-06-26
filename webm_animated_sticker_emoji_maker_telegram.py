@@ -1039,7 +1039,7 @@ class TelegramMaker(tk.Tk):
         # Mutuamente excluyente: Off / Edge / Face.
         self._spin_dwell_var = tk.IntVar(value=100)
         lbl("Dwell (drama):", 12); val_lbl(self._spin_dwell_var, 12, "%")
-        self._spin_dwell_mode = tk.StringVar(value="edge")
+        self._spin_dwell_mode = tk.StringVar(value="face")
         dwf = tk.Frame(left, bg=BG1)
         dwf.grid(row=13, column=0, columnspan=2, sticky="w", pady=(2, 2))
         for val, txt in [("none", "Off"), ("edge", "Edge (rim)"), ("face", "Face")]:
@@ -1139,13 +1139,13 @@ class TelegramMaker(tk.Tk):
             row=28, column=0, columnspan=2, sticky="ew", pady=(2, 8))
 
         # Edge metallic glint
-        self._spin_edge_glint_var = tk.BooleanVar(value=False)
+        self._spin_edge_glint_var = tk.BooleanVar(value=True)
         tk.Checkbutton(left, text="Edge metal glint",
                        variable=self._spin_edge_glint_var,
                        bg=BG1, fg=FG, selectcolor=BG0,
                        activebackground=BG1, font=FONT).grid(
             row=29, column=0, columnspan=2, sticky="w", pady=(2, 0))
-        self._spin_edge_glint_int_var = tk.IntVar(value=20)
+        self._spin_edge_glint_int_var = tk.IntVar(value=25)
         tk.Label(left, text="Edge glint intensity:", bg=BG1, fg=FG2, font=FONT).grid(
             row=30, column=0, sticky="w")
         tk.Label(left, textvariable=self._spin_edge_glint_int_var, bg=BG1, fg=FG,
@@ -1316,6 +1316,49 @@ class TelegramMaker(tk.Tk):
             return rgb
         return self.SPIN_EDGE_COLORS.get(self._spin_edge_var.get(), (5, 5, 5))
 
+    @staticmethod
+    def _suggest_edge_color(img_path,
+                            cool_shift=0.22, sat_scale=0.95, val_scale=0.45):
+        """
+        Extract the dominant hue from img_path and return a darkened, cooler
+        variant of it as '#RRGGBB' — suitable as a suggested border color.
+
+        Algorithm (pure numpy + colorsys, no extra deps):
+          1. Resize to 50×50 to reduce noise while keeping spatial coherence.
+          2. Convert opaque pixels to HSV; ignore near-black / near-gray ones.
+          3. Bucket the vivid pixels by hue (36 bins × 10°) and pick the
+             dominant bin; take the median H/S/V within that bin.
+          4. Lerp hue toward blue/cyan (0.60), compress saturation and value.
+        """
+        import colorsys as _cs
+        try:
+            img = Image.open(img_path).convert("RGBA")
+            thumb = img.resize((50, 50), Image.LANCZOS)
+            ta = np.array(thumb)
+            m = ta[:, :, 3] >= 80
+            if not m.any():
+                return "#0A0A14"
+            tpx = ta[m][:, :3].astype(np.float32) / 255.0
+            hsv = np.array([_cs.rgb_to_hsv(float(r), float(g), float(b))
+                            for r, g, b in tpx])
+            vivid = (hsv[:, 1] > 0.15) & (hsv[:, 2] > 0.15)
+            hsv_v = hsv[vivid] if vivid.sum() > 10 else hsv
+            hue_bins = (hsv_v[:, 0] * 36).astype(int) % 36
+            dom_bin  = int(np.bincount(hue_bins, minlength=36).argmax())
+            in_bin   = np.abs(hue_bins - dom_bin) <= 1
+            if not in_bin.any():
+                in_bin = np.ones(len(hsv_v), bool)
+            h = float(np.median(hsv_v[in_bin, 0]))
+            s = float(np.median(hsv_v[in_bin, 1]))
+            v = float(np.median(hsv_v[in_bin, 2]))
+            h = h + cool_shift * (0.60 - h)
+            s = s * sat_scale
+            v = v * val_scale
+            r2, g2, b2 = _cs.hsv_to_rgb(h % 1.0, min(s, 1.0), min(v, 1.0))
+            return "#%02X%02X%02X" % (int(r2 * 255), int(g2 * 255), int(b2 * 255))
+        except Exception:
+            return "#0A0A14"
+
     def _spin_browse(self):
         path = filedialog.askopenfilename(
             filetypes=[("Images", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"), ("All", "*.*")])
@@ -1325,6 +1368,12 @@ class TelegramMaker(tk.Tk):
         name = os.path.basename(path)
         self._spin_file_lbl.config(
             text=name[:26] + ("…" if len(name) > 26 else ""), fg=FG)
+        # Suggest a border color derived from the image's dominant hue,
+        # but never overwrite a color the user already picked manually.
+        suggested = self._suggest_edge_color(path)
+        self._spin_edge_hex_var.set(suggested)
+        self._spin_edge_var.set("Custom…")
+        self._update_edge_swatch()
         self._spin_show_static(path)
 
     def _spin_show_static(self, path):
