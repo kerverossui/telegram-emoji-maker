@@ -361,32 +361,33 @@ def apply_glint_cel(face_arr, theta, intensity=0.85, speed=1.0):
     return face_arr
 
 
-def _dwell_theta(i, n_frames, dwell):
+def _dwell_theta(i, n_frames, dwell, face=False):
     """
     Map frame index i → theta (0..2π) with non-uniform angular velocity.
 
     dwell=0.0  →  uniform spin (original behaviour)
-    dwell=1.0  →  maximum slowdown at the two edge-on positions (θ=π/2, 3π/2)
+    dwell=1.0  →  maximum slowdown at the dwell positions
 
-    Strategy: within each quarter-turn the easing is a blend between linear and
-    a sine curve that decelerates near the quarter-turn midpoints (edge-on views).
-    We work in normalised phase φ ∈ [0, 1) over a full rotation and build a
-    monotone mapping φ_uniform → φ_eased using a continuous piecewise function,
-    then scale back to radians.
+    face=False → dwell at the two EDGE-ON positions (θ=π/2, 3π/2): the rim/thickness
+                 lingers in view.
+    face=True  → dwell at the two FACE-ON positions (θ=0, π): the coin pauses showing
+                 its face (front and back), zipping through the edge-on moments.
 
-      φ_eased = φ  +  dwell * A * sin(4π·φ)
+    Strategy: in normalised phase φ ∈ [0,1) over a full rotation,
 
-    sin(4π·φ) has zeros at φ=0,0.25,0.5,0.75,1 and peaks exactly between them,
-    slowing the coin near the 90°/270° positions (edge-on) and compensating by
-    speeding it near 0°/180° (face-on).  Amplitude A is chosen so the derivative
-    never goes negative (stays monotone): max|sin(4πφ)'|=4πA ≤ 1 → A ≤ 1/(4π).
-    We use A = 0.95/(4π) to stay safely monotone even at dwell=1.
+      φ_eased = φ  ±  dwell * A * sin(4π·φ)
+
+    sin(4π·φ) has zeros at φ=0,0.25,0.5,0.75,1. With the '+' sign the mapping slows
+    near φ=0.25/0.75 (edge-on); flipping to '-' slows near φ=0/0.5 (face-on) instead.
+    Amplitude A = 0.95/(4π) keeps the derivative ≥0 (monotone, never reverses) even
+    at dwell=1, for either sign.
     """
     if dwell < 0.001:
         return 2 * math.pi * i / n_frames
     phi   = i / n_frames                          # 0..1 uniform
     A     = 0.95 / (4 * math.pi)
-    phi_e = phi + dwell * A * math.sin(4 * math.pi * phi)
+    sign  = -1.0 if face else 1.0
+    phi_e = phi + sign * dwell * A * math.sin(4 * math.pi * phi)
     return phi_e * 2 * math.pi
 
 
@@ -403,7 +404,8 @@ def make_3d_spin_frames(img_path,
                          glint2           = False,
                          glint2_intensity = 0.85,
                          glint2_speed     = 1.0,
-                         edge_dwell       = 0.0,   # 0=uniform, 1=max slowdown at edge-on
+                         edge_dwell       = 0.0,   # 0=uniform, 1=max slowdown at dwell pos
+                         dwell_face       = False, # False=dwell at edge-on, True=at face-on
                          edge_shade       = 0.0,   # 0=solid rim color, >0=subtle cylinder shading
                          edge_glint       = False, # metallic moving sheen on the rim
                          edge_glint_intensity = 0.8,
@@ -452,7 +454,7 @@ def make_3d_spin_frames(img_path,
         if progress_cb:
             progress_cb(i, n_frames)
 
-        theta        = _dwell_theta(i, n_frames, edge_dwell)
+        theta        = _dwell_theta(i, n_frames, edge_dwell, face=dwell_face)
         cos_t        = math.cos(theta)
         sin_t        = math.sin(theta)
         x_scale      = abs(cos_t)
@@ -1033,16 +1035,29 @@ class TelegramMaker(tk.Tk):
             self._spin_thick_var.set(rv)
         slider(self._spin_thick_var, 1.0, 40.0, 10, cmd=_thick_changed)
 
-        # Edge dwell (dramatic slowdown at edge-on position)
+        # Dwell: slow down at edge-on (edge mode) or face-on (face mode).
+        # Mutuamente excluyente: Off / Edge / Face.
         self._spin_dwell_var = tk.IntVar(value=100)
-        lbl("Edge dwell (dramatismo):", 12); val_lbl(self._spin_dwell_var, 12, "%")
-        ttk.Scale(left, from_=0, to=100, variable=self._spin_dwell_var,
-                  orient="horizontal", length=220,
-                  command=lambda v: self._spin_dwell_var.set(int(float(v)))).grid(
-            row=13, column=0, columnspan=2, sticky="ew", pady=(2, 4))
-        tk.Label(left, text="↑ el canto/grosor aparece más tiempo en cámara",
-                 bg=BG1, fg=FG2, font=("Segoe UI", 8), anchor="w").grid(
-            row=14, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        lbl("Dwell (drama):", 12); val_lbl(self._spin_dwell_var, 12, "%")
+        self._spin_dwell_mode = tk.StringVar(value="edge")
+        dwf = tk.Frame(left, bg=BG1)
+        dwf.grid(row=13, column=0, columnspan=2, sticky="w", pady=(2, 2))
+        for val, txt in [("none", "Off"), ("edge", "Edge (rim)"), ("face", "Face")]:
+            tk.Radiobutton(dwf, text=txt, variable=self._spin_dwell_mode, value=val,
+                           bg=BG1, fg=FG, selectcolor=BG0, activebackground=BG1,
+                           font=FONT, command=self._on_dwell_mode).pack(
+                side="left", padx=(0, 10))
+        self._spin_dwell_scale = ttk.Scale(
+            left, from_=0, to=100, variable=self._spin_dwell_var,
+            orient="horizontal", length=220,
+            command=lambda v: self._spin_dwell_var.set(int(float(v))))
+        self._spin_dwell_scale.grid(row=14, column=0, columnspan=2,
+                                    sticky="ew", pady=(2, 2))
+        self._spin_dwell_help = tk.Label(
+            left, text="↑ rim stays longer in view",
+            bg=BG1, fg=FG2, font=("Segoe UI", 8), anchor="w")
+        self._spin_dwell_help.grid(row=15, column=0, columnspan=2,
+                                   sticky="w", pady=(0, 4))
 
         # Edge opacity
         self._spin_opacity_var = tk.IntVar(value=100)
@@ -1123,9 +1138,9 @@ class TelegramMaker(tk.Tk):
                   command=lambda v: self._spin_glint_speed_var.set(int(float(v)))).grid(
             row=28, column=0, columnspan=2, sticky="ew", pady=(2, 8))
 
-        # Edge metallic glint (brillo metálico en el canto, como metal)
+        # Edge metallic glint
         self._spin_edge_glint_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(left, text="Edge metal glint (canto metálico)",
+        tk.Checkbutton(left, text="Edge metal glint",
                        variable=self._spin_edge_glint_var,
                        bg=BG1, fg=FG, selectcolor=BG0,
                        activebackground=BG1, font=FONT).grid(
@@ -1251,6 +1266,23 @@ class TelegramMaker(tk.Tk):
             return None
         return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
 
+    def _on_dwell_mode(self):
+        """Update help text / slider state when the dwell mode changes."""
+        mode = self._spin_dwell_mode.get()
+        if mode == "face":
+            self._spin_dwell_help.config(
+                text="↑ coin pauses on the face (front and back)")
+        elif mode == "edge":
+            self._spin_dwell_help.config(
+                text="↑ rim stays longer in view")
+        else:  # none
+            self._spin_dwell_help.config(text="Uniform spin speed")
+        try:
+            self._spin_dwell_scale.state(
+                ["disabled"] if mode == "none" else ["!disabled"])
+        except Exception:
+            pass
+
     def _on_edge_preset(self, event=None):
         """Preset chosen → fill HEX field. 'Custom…' just lets the user type a HEX."""
         name = self._spin_edge_var.get()
@@ -1323,7 +1355,9 @@ class TelegramMaker(tk.Tk):
         thick_pct = self._spin_thick_var.get()
         opacity   = self._spin_opacity_var.get() / 100.0
         tilt      = self._spin_tilt_var.get()
-        edge_dwell = self._spin_dwell_var.get() / 100.0
+        dwell_mode = self._spin_dwell_mode.get()
+        edge_dwell = 0.0 if dwell_mode == "none" else self._spin_dwell_var.get() / 100.0
+        dwell_face = (dwell_mode == "face")
         edge_col  = self._resolve_edge_color()
         flip      = self._spin_flip_var.get()
         glint_mode    = self._spin_glint_mode.get()
@@ -1367,6 +1401,7 @@ class TelegramMaker(tk.Tk):
                     glint2_intensity = glint_int,
                     glint2_speed     = glint2_speed,
                     edge_dwell       = edge_dwell,
+                    dwell_face       = dwell_face,
                     edge_glint           = edge_glint,
                     edge_glint_intensity = edge_glint_int,
                     progress_cb      = progress_cb,
@@ -1511,20 +1546,20 @@ class TelegramMaker(tk.Tk):
 
     # ── Helpers ───────────────────────────────────────────────────────
     def _btn(self, parent, text, cmd, bg):
-        """Boton estilo monitor clínico. El color NUNCA rellena el control.
+        """Monitor-style button. The color NEVER fills the control background.
 
-        El 4º argumento se reinterpreta como ROL, no como relleno:
-          - bg == BG2  -> boton normal: fondo oscuro, texto gris claro.
-          - bg == ACC/ACC2/...  -> boton PRIMARIO: fondo oscuro, texto y
-            borde de ese color de acento. El color vive en texto+borde.
-        Mantiene la firma original para no romper las llamadas existentes.
+        The 4th argument is interpreted as a ROLE, not a fill color:
+          - bg == BG2  -> normal button: dark background, light gray text.
+          - bg == ACC/ACC2/...  -> PRIMARY button: dark background, text and
+            border in that accent color. The color lives in text + border only.
+        Keeps the original signature to avoid breaking existing call sites.
         """
         if bg == BG2:
             return tk.Button(parent, text=text, command=cmd,
                              bg=BG2, fg=FG2, relief="flat", bd=0,
                              font=FONT, padx=10, pady=5, cursor="hand2",
                              activebackground=BORDER, activeforeground=FG)
-        # Primario: el color pasa a texto + borde fino, fondo oscuro
+        # Primary: color goes to text + thin border, dark background
         return tk.Button(parent, text=text, command=cmd,
                          bg=BG2, fg=bg, relief="flat", bd=0,
                          font=FONT, padx=10, pady=5, cursor="hand2",
