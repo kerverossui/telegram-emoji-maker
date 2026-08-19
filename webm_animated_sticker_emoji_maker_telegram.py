@@ -501,8 +501,26 @@ def make_3d_spin_frames(img_path,
         if abs(sin_t) > 0.02 and rim_w >= 1 and edge_opacity > 0:
             fy_arr    = np.arange(face_h)
             src_y_arr = np.clip((fy_arr / scale_y).astype(np.int32), 0, H - 1)
-            sl_arr    = row_left[src_y_arr]
-            sr_arr    = row_right[src_y_arr]
+
+            # BUGFIX (irregular/asymmetric art): row_left/row_right are the
+            # silhouette of the ORIGINAL (un-mirrored) image, measured once
+            # before the loop. When this frame is showing the mirrored back
+            # face (facing_front=False and not flip_back → FLIP_LEFT_RIGHT
+            # was applied a few lines above), the rim has to be anchored to
+            # the MIRRORED silhouette — not the original one. On a symmetric
+            # shape (e.g. a coin/circle) original and mirrored silhouettes
+            # coincide, so this was invisible. On an irregular/asymmetric
+            # shape (e.g. a hat leaning to one side) it made the rim shoot
+            # off toward where the un-mirrored edge used to be, producing a
+            # disconnected "ghost" edge that looked like it was referencing
+            # the other side of the artwork.
+            mirrored = (not facing_front) and (not flip_back)
+            if mirrored:
+                sl_arr = W - row_right[src_y_arr]
+                sr_arr = W - row_left[src_y_arr]
+            else:
+                sl_arr = row_left[src_y_arr]
+                sr_arr = row_right[src_y_arr]
             valid     = sr_arr >= sl_arr
             cy_arr    = cy - face_h // 2 + fy_arr
 
